@@ -51,15 +51,12 @@
   const G            = 2400;    // 重力 (px/s^2)
   const BASE_VY      = 920;     // 通常ジャンプの初速（上向き）
   const BASE_VX      = 340;     // 開始時の基本前進速度
-  const MIN_VX       = 70;      // チャージ中の最低速度
   const BOOST_MAX    = 330;     // チャージ解放時、そのジャンプだけ前進を速める量（蓄積しない）
   const SPEED_ACCEL  = 0.02;    // 進行距離に応じた等加速度的な加速 (px/s あたり 1px)
   const SPEED_EXTRA_MAX = 520;  // 進行による加速の上限(px/s)
   const HEIGHT_PEN   = 0.45;    // 最大チャージ時の高度低下率（0.45 = 45%減）
-  const CHARGE_TIME  = 0.60;    // フルチャージまでの時間(秒)
+  const CHARGE_TIME  = 0.60;    // フルチャージまでの時間(秒)。この間に通常ジャンプ1回分進む
   const CHARGE_MAX   = 1.0;     // チャージ上限（超えると自動解放）
-  const BRAKE_GROUND = 60;      // チャージ中（地上）の基本減速レート(px/s)
-  const BRAKE_DRAG   = 0.42;    // 速度に比例する減速（速いほど減速が強くなる）
   const NEAR_GROUND_H= 90;      // この高さ以内（降下中）ならチャージ可能(px)
   const CAM_ANCHOR   = 130;     // ボールの画面上の位置(px)。小さいほど左寄りで前方が見やすい
   const CAM_SMOOTH   = 6;       // カメラ追従の滑らかさ（大きいほど速い）
@@ -350,9 +347,10 @@
 
     if (p.onGround) {
       if (holdNow) {
-        // 減速（チャージ中）— 踏みとどまる。速度が上がるほど減速も強い（基本＋速度比例）。
-        const brake = BRAKE_GROUND + p.vx * BRAKE_DRAG;
-        p.vx = Math.max(MIN_VX, p.vx - brake * dt);
+        // チャージ中は一定速度で前進。フルチャージ(CHARGE_TIME)でちょうど
+        // 通常ジャンプ1回分の飛距離（= runSpeed × 滞空時間）だけ進むよう速度を設定。
+        const jumpDist = runSpeedAt(p.x) * (2 * BASE_VY / G);
+        p.vx = jumpDist / CHARGE_TIME;
         p.y = GROUND_Y; p.vy = 0;
       } else if (charge > 0) {
         // チャージ解放ジャンプ（離した瞬間に即発射）
