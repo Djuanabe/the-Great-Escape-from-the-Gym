@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>チャージランナー - 横スクロールアクション</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0b0d1a;
+    overflow: hidden;
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+    -webkit-user-select: none; user-select: none;
+    touch-action: none;
+  }
+  #wrap {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    background: #1a1f3a;
+    box-shadow: 0 0 40px rgba(0,0,0,0.6);
+    image-rendering: auto;
+    max-width: 100%; max-height: 100%;
+  }
+  #hint {
+    position: absolute; bottom: 8px; left: 0; right: 0;
+    text-align: center; color: #6a7099; font-size: 12px;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="960" height="540"></canvas>
+</div>
+<div id="hint">スペース / クリック / タップ で操作</div>
+
+<script>
+"use strict";
+(function () {
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+
+  // ---------------------------------------------------------------------------
+  // 物理・ゲーム定数
+  // ---------------------------------------------------------------------------
+  const GROUND_Y     = 430;     // 地面の高さ（プレイヤーの足の基準）
+  const G            = 2400;    // 重力 (px/s^2)
+  const BASE_VY      = 920;     // 通常ジャンプの初速（上向き）
+  const BASE_VX      = 340;     // 開始時の基本前進速度
+  const MIN_VX       = 70;      // チャージ中の最低速度
+  const BOOST_MAX    = 330;     // チャージ解放時、そのジャンプだけ前進を速める量（蓄積しない）
+  const SPEED_ACCEL  = 0.02;    // 進行距離に応じた等加速度的な加速 (px/s あたり 1px)
+  const SPEED_EXTRA_MAX = 520;  // 進行による加速の上限(px/s)
+  const HEIGHT_PEN   = 0.45;    // 最大チャージ時の高度低下率（0.45 = 45%減）
+  const CHARGE_TIME  = 0.60;    // フルチャージまでの時間(秒)
+  const CHARGE_MAX   = 1.0;     // チャージ上限（超えると自動解放）
+  const BRAKE_GROUND = 60;      // チャージ中（地上）の基本減速レート(px/s)
+  const BRAKE_DRAG   = 0.42;    // 速度に比例する減速（速いほど減速が強くなる）
+  const NEAR_GROUND_H= 90;      // この高さ以内（降下中）ならチャージ可能(px)
+  const CAM_ANCHOR   = 130;     // ボールの画面上の位置(px)。小さいほど左寄りで前方が見やすい
+  const CAM_SMOOTH   = 6;       // カメラ追従の滑らかさ（大きいほど速い）
+  const ZOOM         = 0.74;    // 画面の引き（<1ほど広く見える＝進行先を確認しやすい）
+  const GROUND_SCREEN_Y = 440;  // 地面ラインの画面上の高さ(px)
+
+  const PLAYER_W = 26, PLAYER_H = 32;
+  const FALL_ALLOW = 16;        // 地面を超えて落ちてもセーフな余地(px)
+  const DEATH_Y  = GROUND_Y + FALL_ALLOW;
+  const HOLE_GRACE = 14;        // 穴の落下判定を見た目より両端で狭める余地(px)
+
+  // ボールの色は2色（オレンジ／黒）。色が一致した壁はすり抜けられる。
+  // 壁・移動壁は白（中立）もあり、白はどの色でも必ず衝突（すり抜け不可）。
+  const COL_ORANGE = "orange", COL_BLACK = "black", COL_WHITE = "white";
+  const PALETTE = {
+    orange: { main: "#df6f17", light: "#ffae5c", seam: "#1b1206" },
+    black:  { main: "#2b2b30", light: "#5d5d66", seam: "#e8e8f0" },
+    white:  { main: "#eceef3", light: "#ffffff", seam: "#3a2a14" }
+  };
+
+  // ステージ生成
+  const SEG_W        = W;          // 一画面分
+  const GEN_STEP     = SEG_W / 2;  // 生成・軌道計算の刻み（半画面ごと）
+  const START_SAFE_X = SEG_W * 1.4;// 開始直後の安全地帯
+  const MARGIN_BASE  = 78;         // 軌道に持たせる初期猶予（各窓の先頭）
+  const MARGIN_MIN   = 18;         // 最小猶予
+  const MARGIN_SHRINK= 0.0042;     // 距離あたりの猶予縮小量（全体）
+  const WINDOW_NARROW= 38;         // 半画面の窓内で進むほど狭める量(px)
+  const MAX_WALL_H   = 150;
+  const MIN_WALL_H   = 22;
+  const MAX_AMPL     = 78;
+  const ISLAND_HOLE_MIN = 230;     // 浮島を置く穴幅の絶対下限(px)
+  const ISLAND_HOLE_FRAC = 0.70;   // 浮島は「最大級の穴」だけに。速度×この比率より広い穴のみ
+  const ISLAND_W     = 66;         // 浮島の幅(px)
+  const ISLAND_H     = 26;         // 浮島の厚み（描画用, px）
+
+  // 壁・移動壁が「色付き（すり抜け可能）」になる確率。進行するほど増える。
+  const COLORED_BASE = 0.12;       // 序盤の色付き割合（残りは白＝すり抜け不可）
+  const COLORED_RATE = 0.00006;    // 距離あたりの増加
+  const COLORED_MAX  = 0.85;       // 色付き割合の上限
+
+  // 妨害要素どうしの最低間隔（序盤は広く、進むほど詰まる）
+  const SPACING_START = 1050;      // 序盤の最低間隔(px)
+  const SPACING_MIN   = 170;       // 最終的な最低間隔(px)
+  const SPACING_SHRINK= 0.058;     // 距離あたりの間隔縮小量
+
+  // ---------------------------------------------------------------------------
+  // シード付き乱数 (mulberry32) — 再現可能なステージ生成のため
+  // ---------------------------------------------------------------------------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // ゲーム状態
+  // ---------------------------------------------------------------------------
+  let state;            // "title" | "play" | "dead"
+  let rng;              // 生成用乱数
+  let ghost;            // ステージ生成用の通過可能ゴースト
+  let obstacles;
+  let generatedUpToX;
+  let lastObstacleX;    // 直前に置いた妨害要素のx（間隔制御用）
+  let player;
+  let time;             // ゲーム内経過時間(秒) — 上下する壁の駆動に使用
+  let score, best;
+  let holding;          // 物理的にボタンが押されているか
+  let charge;
+  let chargeLocked;     // チャージ上限に達して自動解放された状態
+  let shakeT;
+  let camX = 0;         // カメラのワールドx（描画原点）
+  let deadAt = -1;
+
+  best = parseInt(localStorage.getItem("cr_best") || "0", 10) || 0;
+
+  function reset() {
+    state = "title";
+    initRun(0xC0FFEE); // 固定シード（タイトル背景用）
+  }
+
+  function initRun(seed) {
+    rng = mulberry32(seed);
+    ghost = { x: 0 };
+    obstacles = [];
+    generatedUpToX = 0;
+    lastObstacleX = -Infinity;
+    player = {
+      x: 60, y: GROUND_Y, vy: 0, vx: BASE_VX,
+      onGround: true, alive: true, nearGround: true,
+      ballColor: COL_ORANGE
+    };
+    camX = player.x - CAM_ANCHOR;
+    time = 0;
+    score = 0;
+    holding = false;
+    charge = 0;
+    chargeLocked = false;
+    shakeT = 0;
+    ensureGenerated(player.x + SEG_W * 2);
+  }
+
+  function startGame() {
+    initRun((Math.random() * 0xFFFFFFFF) >>> 0);
+    state = "play";
+  }
+
+  // ---------------------------------------------------------------------------
+  // ステージ生成
+  //   ゴーストがプレイヤーと同じ物理でランダムに跳ね、その「再現可能な軌道」を
+  //   解析的に求める。各放物線アーク（着地〜着地）に対し、軌道を避ける形で
+  //   穴・壁・上下する壁を配置する。猶予 margin は距離とともに縮小し、さらに
+  //   妨害要素どうしの最低間隔も序盤は広く取る。
+  // ---------------------------------------------------------------------------
+  function ensureGenerated(targetX) {
+    while (generatedUpToX < targetX) genStep();
+  }
+
+  // 半画面ぶんずつステージを生成する
+  function genStep() {
+    const segEnd = generatedUpToX + GEN_STEP;
+    while (ghost.x < segEnd) {
+      // 放物線アーク（ランダムなチャージ）。障害物はアーク内のみ。着地後すぐ次のアーク。
+      const c = rng() < 0.5 ? 0 : rng() * CHARGE_MAX;
+      const vy = BASE_VY * (1 - c * HEIGHT_PEN);
+      const x0 = ghost.x;
+      const vx = runSpeedAt(x0) + c * BOOST_MAX; // プレイヤーと同じ距離依存の速度で生成
+      const T  = 2 * vy / G;
+      const landX = x0 + vx * T;
+      const apexX = x0 + vx * (vy / G);
+      const apexY = GROUND_Y - vy * vy / (2 * G);
+      if (x0 >= START_SAFE_X) placeArcObstacle(x0, landX, apexX, apexY);
+      ghost.x = landX;
+    }
+    generatedUpToX = segEnd;
+  }
+
+  // 壁・移動壁の色を選ぶ。序盤は白（すり抜け不可）が多く、進むほど色付きが増える。
+  function pickWallColor(dist) {
+    const pColored = Math.min(COLORED_MAX, COLORED_BASE + dist * COLORED_RATE);
+    if (rng() < pColored) return rng() < 0.5 ? COL_ORANGE : COL_BLACK;
+    return COL_WHITE;
+  }
+
+  function placeArcObstacle(x0, landX, apexX, apexY) {
+    const dist = x0;
+    // 軌道計算は半画面ごとに区切る。各「窓」の先頭で猶予を取り直して広くし、
+    // 窓内を進むにつれ狭める（さらに全体距離が進むほど全体的にも狭まる）。
+    const winProg = (dist % GEN_STEP) / GEN_STEP;            // 0..1 窓内の進行度
+    const globalBase = MARGIN_BASE - dist * MARGIN_SHRINK;   // 距離による全体の縮小
+    const margin = Math.max(MARGIN_MIN, globalBase - winProg * WINDOW_NARROW);
+
+    // 妨害要素どうしの最低間隔を確保（序盤は広い）
+    const spacing = Math.max(SPACING_MIN, SPACING_START - dist * SPACING_SHRINK);
+    if (x0 - lastObstacleX < spacing) return;
+
+    // 距離が進むほど障害物の出現確率が上がる
+    const pObstacle = Math.min(0.9, 0.5 + dist * 0.00003);
+    if (rng() > pObstacle) return;
+
+    const arcW = landX - x0;
+    const clearance = GROUND_Y - apexY;
+    const t = rng();
+
+    if (t < 0.40 && arcW > (2 * margin + 70)) {
+      const hx1 = x0 + margin, hx2 = landX - margin;
+      const hole = { type: "hole", x1: hx1, x2: hx2 };
+      // 救済の浮島は「最大級の穴」だけに置く（中サイズの穴には付けない）。
+      const islandThreshold = Math.max(ISLAND_HOLE_MIN, runSpeedAt(x0) * ISLAND_HOLE_FRAC);
+      if (hx2 - hx1 > islandThreshold) {
+        const cx = (hx1 + hx2) / 2;
+        hole.island = {
+          x1: cx - ISLAND_W / 2, x2: cx + ISLAND_W / 2,
+          color: rng() < 0.5 ? COL_ORANGE : COL_BLACK
+        };
+      }
+      obstacles.push(hole);
+      lastObstacleX = landX;
+    } else if (t < 0.70) {
+      const h = Math.min(clearance - margin, MAX_WALL_H);
+      if (h > MIN_WALL_H) {
+        const color = pickWallColor(dist);
+        obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: color });
+        lastObstacleX = apexX + 14;
+      }
+    } else {
+      const ampl = Math.min(MAX_AMPL, 28 + dist * 0.004);
+      const gapH = 2 * (ampl + margin);
+      const color = pickWallColor(dist);
+      obstacles.push({
+        type: "mover",
+        x: apexX - 17, w: 34,
+        center: apexY, ampl: ampl, gapH: gapH,
+        phase: rng() * Math.PI * 2,
+        speed: 1.4 + rng() * 1.6,
+        color: color
+      });
+      lastObstacleX = apexX + 17;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 地形クエリ
+  // ---------------------------------------------------------------------------
+  function holeAt(x) {
+    // 落下判定は見た目の穴より両端を HOLE_GRACE ぶん狭める。
+    // → チャージ解放が少し遅れても／着地が少し手前でも、縁では落ちない余地を持たせる。
+    for (let i = 0; i < obstacles.length; i++) {
+      const o = obstacles[i];
+      if (o.type === "hole" && x >= o.x1 + HOLE_GRACE && x <= o.x2 - HOLE_GRACE) return o;
+    }
+    return null;
+  }
+
+  // その位置に着地できる足場があるか（通常の地面 or 色違いの浮島）
+  function landableAt(x) {
+    const h = holeAt(x);
+    if (!h) return true;                       // 通常の地面
+    const isl = h.island;
+    if (isl && x >= isl.x1 - HOLE_GRACE && x <= isl.x2 + HOLE_GRACE
+        && isl.color !== player.ballColor) {   // 色が違う浮島＝足場として着地できる
+      return true;
+    }
+    return false;                              // 穴（または同色で通り抜ける浮島）
+  }
+
+  function moverGap(o) {
+    const center = o.center + o.ampl * Math.sin(o.phase + time * o.speed);
+    return { top: center - o.gapH / 2, bottom: center + o.gapH / 2 };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 入力
+  // ---------------------------------------------------------------------------
+  function press() {
+    ensureAudio(); // ユーザー操作のタイミングで音声を有効化
+    if (state === "title") { startGame(); return; }
+    if (state === "dead") { if (time - deadAt > 0.4) startGame(); return; }
+    if (!player.onGround && !player.nearGround) {
+      // 高い空中での押下：ボールの色を切り替える（壁すり抜け用）
+      player.ballColor = player.ballColor === COL_ORANGE ? COL_BLACK : COL_ORANGE;
+      playSwitch();
+      return;
+    }
+    holding = true;
+    chargeLocked = false; // 新しく押し直したらチャージ可能に戻す
+  }
+  function release() {
+    if (state === "play") { holding = false; chargeLocked = false; }
+  }
+
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.key === " ") { e.preventDefault(); if (!e.repeat) press(); }
+  });
+  window.addEventListener("keyup", function (e) {
+    if (e.code === "Space" || e.key === " ") { e.preventDefault(); release(); }
+  });
+  cv.addEventListener("mousedown", function (e) { e.preventDefault(); press(); });
+  window.addEventListener("mouseup", function () { release(); });
+  cv.addEventListener("touchstart", function (e) { e.preventDefault(); press(); }, { passive: false });
+  window.addEventListener("touchend", function (e) { e.preventDefault(); release(); }, { passive: false });
+
+  // ---------------------------------------------------------------------------
+  // 更新
+  // ---------------------------------------------------------------------------
+  function update(dt) {
+    time += dt;
+    if (state !== "play") return;
+
+    const p = player;
+    const holdNow = holding && !chargeLocked; // 実効的な「押している」状態
+
+    // チャージが有効なのは「接地中」か「着地に向けて降下中で地面に近い」ときだけ。
+    // 高い空中ではボタンは無効（何も溜まらない）。
+    p.nearGround = p.onGround || (p.vy >= 0 && (GROUND_Y - p.y) <= NEAR_GROUND_H);
+    const canCharge = holdNow && p.nearGround;
+    if (canCharge) {
+      charge += dt / CHARGE_TIME;
+      if (charge >= CHARGE_MAX) { charge = CHARGE_MAX; chargeLocked = true; } // 上限で自動解放
+    }
+
+    // チャージ音（溜まるほど音階が上がる）。チャージしていない間は止める。
+    if (canCharge) { startChargeTone(); updateChargeTone(charge); }
+    else { stopChargeTone(); }
+
+    if (p.onGround) {
+      if (holdNow) {
+        // 減速（チャージ中）— 踏みとどまる。速度が上がるほど減速も強い（基本＋速度比例）。
+        const brake = BRAKE_GROUND + p.vx * BRAKE_DRAG;
+        p.vx = Math.max(MIN_VX, p.vx - brake * dt);
+        p.y = GROUND_Y; p.vy = 0;
+      } else if (charge > 0) {
+        // チャージ解放ジャンプ（離した瞬間に即発射）
+        launch(charge);
+      } else {
+        // 着地後すぐの自動ジャンプ（チャージなし）。連続して跳ね続ける。
+        launch(0);
+      }
+    } else {
+      // 空中ではチャージしない（押していても何も溜まらない）
+      p.vy += G * dt;
+    }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+
+    // 着地 / 落下判定（見た目どおり：地面を超えて落ちたらアウト。FALL_ALLOW の余地あり）
+    if (p.y >= GROUND_Y) {
+      if (landableAt(p.x)) {   // 通常の地面 or 色違いの浮島に着地
+        if (!p.onGround) playLand(); // 着地音（空中→接地の瞬間だけ）
+        p.y = GROUND_Y; p.vy = 0; p.onGround = true;
+      } else {
+        p.onGround = false; // 穴の上（または同色の浮島）：落下継続
+        if (p.y > DEATH_Y) return die();
+      }
+    }
+
+    checkCollisions();
+
+    ensureGenerated(p.x + SEG_W * 2);
+
+    const cutoff = p.x - SEG_W;
+    while (obstacles.length && obstacleRight(obstacles[0]) < cutoff) obstacles.shift();
+
+    score = Math.floor(p.x / 10);
+    if (shakeT > 0) shakeT -= dt;
+
+    // カメラを滑らかに追従。速度が高いほど基準位置より前に出て前進感が増す。
+    // camX はワールド左端。ズームを掛けるので基準はワールド単位に換算する。
+    const anchorW = CAM_ANCHOR / ZOOM;
+    const camTarget = p.x - anchorW;
+    camX += (camTarget - camX) * Math.min(1, CAM_SMOOTH * dt);
+    const ballPx = (p.x - camX) * ZOOM;       // ボールの画面上x(px)。画面内に保つ
+    const maxPx = W * 0.84, minPx = 80;
+    if (ballPx > maxPx) camX = p.x - maxPx / ZOOM;
+    if (ballPx < minPx) camX = p.x - minPx / ZOOM;
+  }
+
+  // 進行距離に応じた基本前進速度（等加速度的に緩やかに上昇、上限あり）
+  function runSpeedAt(x) {
+    return BASE_VX + Math.min(SPEED_EXTRA_MAX, x * SPEED_ACCEL);
+  }
+
+  function launch(c) {
+    const p = player;
+    p.vy = -BASE_VY * (1 - c * HEIGHT_PEN);
+    // チャージ分はそのジャンプ限りの加速（慣性として蓄積しない）。基本速度は進行で緩やかに上昇。
+    p.vx = runSpeedAt(p.x) + c * BOOST_MAX;
+    p.onGround = false;
+    charge = 0;            // ジャンプしたらチャージはリセット
+    chargeLocked = true;   // 押しっぱなしでは再チャージしない（押し直しで解除）
+    stopChargeTone();
+    playJump(c);           // ジャンプ音（チャージが大きいほど高め）
+  }
+
+  function obstacleRight(o) {
+    return o.type === "hole" ? o.x2 : o.x + o.w;
+  }
+
+  function checkCollisions() {
+    const p = player;
+    const left = p.x - PLAYER_W / 2, right = p.x + PLAYER_W / 2;
+    const top = p.y - PLAYER_H, bottom = p.y;
+    for (let i = 0; i < obstacles.length; i++) {
+      const o = obstacles[i];
+      if (o.color && o.color === p.ballColor) continue; // 色が一致＝すり抜け
+      if (o.type === "wall") {
+        const wtop = GROUND_Y - o.h;
+        if (right > o.x && left < o.x + o.w && bottom > wtop) return die();
+      } else if (o.type === "mover") {
+        if (right > o.x && left < o.x + o.w) {
+          const g = moverGap(o);
+          if (top < g.top || bottom > g.bottom) return die();
+        }
+      }
+    }
+  }
+
+  function die() {
+    if (!player.alive) return;
+    player.alive = false;
+    state = "dead";
+    deadAt = time;
+    shakeT = 0.4;
+    stopChargeTone();
+    playDeath();
+    if (score > best) { best = score; localStorage.setItem("cr_best", String(best)); }
+  }
+
+  // ---------------------------------------------------------------------------
+  // サウンド（Web Audio）
+  // ---------------------------------------------------------------------------
+  let actx = null;
+  let chargeOsc = null, chargeGain = null;
+
+  function ensureAudio() {
+    if (!actx) {
+      try { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { actx = null; }
+    }
+    if (actx && actx.state === "suspended") actx.resume();
+  }
+
+  function startChargeTone() {
+    if (!actx || chargeOsc) return;
+    chargeOsc = actx.createOscillator();
+    chargeGain = actx.createGain();
+    chargeOsc.type = "triangle";
+    chargeOsc.frequency.value = 220;
+    chargeGain.gain.value = 0.0001;
+    chargeGain.gain.linearRampToValueAtTime(0.10, actx.currentTime + 0.03);
+    chargeOsc.connect(chargeGain).connect(actx.destination);
+    chargeOsc.start();
+  }
+  function updateChargeTone(c) {
+    if (!actx || !chargeOsc) return;
+    // チャージが進むほど高い音階へ（約2オクターブ上昇）
+    const f = 220 * Math.pow(2, c * 2);
+    chargeOsc.frequency.setTargetAtTime(f, actx.currentTime, 0.02);
+  }
+  function stopChargeTone() {
+    if (!actx || !chargeOsc) return;
+    const o = chargeOsc, g = chargeGain;
+    g.gain.cancelScheduledValues(actx.currentTime);
+    g.gain.setTargetAtTime(0.0001, actx.currentTime, 0.03);
+    o.stop(actx.currentTime + 0.12);
+    chargeOsc = null; chargeGain = null;
+  }
+  function playSwitch() {
+    if (!actx) return;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "triangle";
+    const base = player.ballColor === COL_BLACK ? 300 : 520; // 色で音程を変える
+    o.frequency.setValueAtTime(base, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(base * 1.5, actx.currentTime + 0.07);
+    g.gain.setValueAtTime(0.12, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.12);
+  }
+  function playJump(c) {
+    if (!actx) return;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "square";
+    const base = 330 + c * 260;                // チャージが大きいほど高い
+    o.frequency.setValueAtTime(base, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(base * 1.7, actx.currentTime + 0.10);
+    g.gain.setValueAtTime(0.16, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.18);
+  }
+  function playLand() {
+    if (!actx) return;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(190, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(70, actx.currentTime + 0.11);
+    g.gain.setValueAtTime(0.2, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.18);
+  }
+  function playDeath() {
+    if (!actx) return;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "sawtooth";
+    o.frequency.setValueAtTime(420, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(80, actx.currentTime + 0.4);
+    g.gain.setValueAtTime(0.18, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.45);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.5);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 描画
+  // ---------------------------------------------------------------------------
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, "#f6e1ac");
+    sky.addColorStop(0.6, "#efd293");
+    sky.addColorStop(1, "#e7c07a");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    // タイトル中はカメラを固定基準に
+    const cam = state === "title" ? (player.x - CAM_ANCHOR / ZOOM) : camX;
+    drawParallax(cam);
+
+    let sx = 0, sy = 0;
+    if (shakeT > 0) { sx = (Math.random() - 0.5) * 10; sy = (Math.random() - 0.5) * 10; }
+    ctx.save();
+    // 地面ラインを基準にズームアウトしてワールドを描画（引きで先まで見える）
+    ctx.translate(sx, GROUND_SCREEN_Y + sy);
+    ctx.scale(ZOOM, ZOOM);
+    ctx.translate(-cam, -GROUND_Y);
+
+    drawGround(cam);
+    drawObstacles(cam);
+    drawPlayer();
+
+    ctx.restore();
+
+    drawHUD();
+    if (state === "title") drawTitle();
+    if (state === "dead")  drawDead();
+  }
+
+  function drawParallax(camX) {
+    ctx.save();
+    // 観客席／壁を思わせる、暖色のぼんやりした帯
+    ctx.fillStyle = "rgba(196,150,86,0.30)";
+    const off1 = -(camX * 0.2) % 300;
+    for (let i = -1; i < W / 300 + 2; i++) {
+      const bx = off1 + i * 300;
+      ctx.beginPath(); ctx.arc(bx + 150, H, 200, Math.PI, 0); ctx.fill();
+    }
+    ctx.fillStyle = "rgba(170,124,66,0.34)";
+    const off2 = -(camX * 0.45) % 220;
+    for (let i = -1; i < W / 220 + 2; i++) {
+      const bx = off2 + i * 220;
+      ctx.beginPath(); ctx.arc(bx + 110, H + 40, 150, Math.PI, 0); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawGround(camX) {
+    const x0 = camX - 40, x1 = camX + W / ZOOM + 40;
+    const holes = obstacles
+      .filter(o => o.type === "hole" && o.x2 > x0 && o.x1 < x1)
+      .sort((a, b) => a.x1 - b.x1);
+
+    // 地面ブロックを穴で分割して描画
+    let cursor = x0;
+    for (const h of holes) {
+      if (h.x1 > cursor) fillGroundBlock(cursor, h.x1);
+      cursor = Math.max(cursor, h.x2);
+    }
+    if (cursor < x1) fillGroundBlock(cursor, x1);
+
+    // 穴を強調表示（視認性アップ）
+    for (const h of holes) drawHole(h);
+  }
+
+  const TILE = 48; // 床板の幅
+  function fillGroundBlock(a, b) {
+    // バスケットコートの木目フロア
+    ctx.fillStyle = "#c89a5b";
+    ctx.fillRect(a, GROUND_Y, b - a, H - GROUND_Y + 60);
+
+    // 流れていく板模様（前進感を出すための主要な手がかり）
+    ctx.save();
+    ctx.beginPath(); ctx.rect(a, GROUND_Y, b - a, H - GROUND_Y + 60); ctx.clip();
+    const t0 = Math.floor(a / TILE) * TILE;
+    for (let tx = t0; tx < b; tx += TILE) {
+      // 板ごとの濃淡
+      const col = (Math.floor(tx / TILE) & 1) ? "#c0934f" : "#cea466";
+      ctx.fillStyle = col;
+      ctx.fillRect(tx, GROUND_Y + 10, TILE, 999);
+      // 縦の継ぎ目
+      ctx.fillStyle = "rgba(120,80,30,0.45)";
+      ctx.fillRect(tx, GROUND_Y, 2, H - GROUND_Y + 60);
+    }
+    ctx.restore();
+
+    // 上端のコートライン（白）
+    ctx.fillStyle = "#caa066";
+    ctx.fillRect(a, GROUND_Y, b - a, 8);
+    ctx.fillStyle = "#f7eedd";
+    ctx.fillRect(a, GROUND_Y, b - a, 3);
+  }
+
+  function drawHole(h) {
+    // 床が抜けた穴。明るい背景でも分かるよう、手前をうっすら暗くして縁取る。
+    const grd = ctx.createLinearGradient(0, GROUND_Y, 0, GROUND_Y + 70);
+    grd.addColorStop(0, "rgba(40,24,8,0.55)");
+    grd.addColorStop(1, "rgba(40,24,8,0)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(h.x1, GROUND_Y, h.x2 - h.x1, 70);
+
+    // 縁取り（濃い赤茶）
+    ctx.fillStyle = "#b5371f";
+    ctx.fillRect(h.x1 - 5, GROUND_Y, 5, 34); // 左の縁
+    ctx.fillRect(h.x2, GROUND_Y, 5, 34);     // 右の縁
+    ctx.fillStyle = "#3a2410";
+    ctx.fillRect(h.x1 - 5, GROUND_Y, 5, 4);
+    ctx.fillRect(h.x2, GROUND_Y, 5, 4);
+
+    if (h.island) drawIsland(h.island);
+  }
+
+  function drawIsland(isl) {
+    const pal = PALETTE[isl.color] || PALETTE.orange;
+    const matched = (isl.color === player.ballColor); // 同色＝足場にならず通り抜ける
+    const w = isl.x2 - isl.x1;
+    ctx.save();
+    ctx.globalAlpha = matched ? 0.28 : 1.0; // 同色なら半透明（乗れない合図）
+    // 浮島本体（上面＝GROUND_Y、下に厚み）
+    ctx.fillStyle = pal.main;
+    ctx.fillRect(isl.x1, GROUND_Y, w, ISLAND_H);
+    ctx.fillStyle = pal.light;
+    ctx.fillRect(isl.x1, GROUND_Y, w, 5); // 上面ハイライト
+    ctx.globalAlpha = matched ? 0.4 : 1.0;
+    ctx.strokeStyle = "rgba(0,0,0,0.4)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(isl.x1, GROUND_Y, w, ISLAND_H);
+    ctx.restore();
+  }
+
+  function drawObstacles(camX) {
+    const x0 = camX - 60, x1 = camX + W / ZOOM + 60;
+    for (const o of obstacles) {
+      if (o.type === "hole") continue;
+      if (o.x + o.w < x0 || o.x > x1) continue;
+      const pal = PALETTE[o.color] || PALETTE.orange;
+      const matched = (o.color === player.ballColor); // 今の色ですり抜け可能
+
+      ctx.save();
+      ctx.globalAlpha = matched ? 0.28 : 1.0; // 一致中は半透明（すり抜けられる合図）
+      if (o.type === "wall") {
+        const wtop = GROUND_Y - o.h;
+        ctx.fillStyle = pal.main;
+        ctx.fillRect(o.x, wtop, o.w, o.h);
+        ctx.fillStyle = pal.light;
+        ctx.fillRect(o.x, wtop, o.w, 6);
+        ctx.globalAlpha = matched ? 0.4 : 1.0;
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(o.x, wtop, o.w, o.h);
+      } else if (o.type === "mover") {
+        const g = moverGap(o);
+        ctx.fillStyle = pal.main;
+        if (g.top > 0) ctx.fillRect(o.x, -20, o.w, g.top + 20);
+        ctx.fillRect(o.x, g.bottom, o.w, GROUND_Y - g.bottom);
+        ctx.fillStyle = pal.light;
+        ctx.fillRect(o.x, g.top - 5, o.w, 5);
+        ctx.fillRect(o.x, g.bottom, o.w, 5);
+      }
+      ctx.restore();
+    }
+  }
+
+  const BALL_R = 16; // バスケットボールの半径
+  function drawPlayer() {
+    const p = player;
+
+    // 接地影
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(p.x, GROUND_Y + 2, BALL_R * 0.9, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // チャージのグロー
+    if (charge > 0) {
+      ctx.fillStyle = chargeLocked
+        ? `rgba(255,160,120,0.7)`
+        : `rgba(120,220,255,${0.3 + charge * 0.5})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y - BALL_R, BALL_R * (1.25 + charge * 0.7), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 転がり回転（前進に応じて回る）と、接地時のスクワッシュ
+    const rot = p.x * 0.02;
+    const sx = p.onGround ? 1.14 : 1.0;
+    const sy = p.onGround ? 0.86 : 1.0;
+
+    ctx.save();
+    ctx.translate(p.x, p.y);          // 接地点（ボール下端）
+    ctx.scale(sx, sy);
+    ctx.translate(0, -BALL_R);        // ボール中心へ
+    ctx.rotate(rot);
+
+    // ボール本体（現在の色の球。左上を明るく）
+    const pal = PALETTE[p.ballColor] || PALETTE.orange;
+    if (player.alive) {
+      const g = ctx.createRadialGradient(-BALL_R * 0.35, -BALL_R * 0.35, BALL_R * 0.2, 0, 0, BALL_R);
+      g.addColorStop(0, pal.light);
+      g.addColorStop(1, pal.main);
+      ctx.fillStyle = g;
+    } else {
+      ctx.fillStyle = "#8a8a8a";
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, BALL_R, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 継ぎ目（色に応じて見やすい色に：オレンジ=黒、黒=白系）
+    ctx.strokeStyle = pal.seam;
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    ctx.moveTo(-BALL_R, 0); ctx.lineTo(BALL_R, 0);   // 横
+    ctx.moveTo(0, -BALL_R); ctx.lineTo(0, BALL_R);   // 縦
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, -BALL_R); ctx.quadraticCurveTo(-BALL_R * 0.78, 0, 0, BALL_R); // 左カーブ
+    ctx.moveTo(0, -BALL_R); ctx.quadraticCurveTo(BALL_R * 0.78, 0, 0, BALL_R);  // 右カーブ
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#3a2710";
+    ctx.font = "bold 26px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("距離 " + score + " m", 20, 38);
+    ctx.font = "16px sans-serif";
+    ctx.fillStyle = "#7a6033";
+    ctx.fillText("ベスト " + best + " m", 22, 60);
+
+    if (state === "play") {
+      // 現在のボール色インジケータ（空中の押下で切り替わる）
+      const pal = PALETTE[player.ballColor] || PALETTE.orange;
+      const ix = 30, iy = 86, ir = 12;
+      ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2);
+      ctx.fillStyle = pal.main; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.stroke();
+      ctx.fillStyle = "#3a2710"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
+      ctx.fillText("現在の色（空中でタップして切替）", ix + 20, iy + 4);
+
+      const mw = 180, mh = 14, mx = W - mw - 24, my = 28;
+      const lockedHold = chargeLocked && holding;                       // 押しっぱなしで再チャージ不可
+      const airborneDisabled = holding && !player.nearGround && !chargeLocked;
+      ctx.fillStyle = "rgba(60,40,16,0.18)";
+      roundRect(mx, my, mw, mh, 7); ctx.fill();
+      if (lockedHold) {
+        ctx.fillStyle = "#ff9a6a"; // ロック中：オレンジ点滅（放すまで再チャージ不可）
+        if ((time * 8) % 2 < 1) { roundRect(mx, my, mw, mh, 7); ctx.fill(); }
+      } else if (!airborneDisabled) {
+        const grd = ctx.createLinearGradient(mx, 0, mx + mw, 0);
+        grd.addColorStop(0, "#5ad6c0");
+        grd.addColorStop(1, "#78dcff");
+        ctx.fillStyle = grd;
+        roundRect(mx, my, mw * charge, mh, 7); ctx.fill();
+      }
+      ctx.fillStyle = airborneDisabled ? "#9a8048" : "#6b5126";
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "right";
+      const label = lockedHold ? "放して！" : (airborneDisabled ? "空中（無効）" : "チャージ");
+      ctx.fillText(label, mx - 8, my + 12);
+      ctx.textAlign = "left";
+    }
+  }
+
+  function drawTitle() {
+    overlay();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 52px sans-serif";
+    ctx.fillText("チャージランナー", W / 2, H / 2 - 70);
+    ctx.font = "18px sans-serif";
+    ctx.fillStyle = "#c8cdf0";
+    const lines = [
+      "ボールは自動で前進し、一定間隔で跳ね続ける",
+      "地上付近で押し続けて減速＆チャージ → 離すと加速ジャンプ",
+      "空中でタップするとボールの色が切り替わる（オレンジ⇔黒）",
+      "色付きの壁は色を合わせればすり抜け／白い壁は跳び越えるしかない",
+      "進むほど色付きの壁が増える。穴も跳び越えよう！",
+    ];
+    lines.forEach((t, i) => ctx.fillText(t, W / 2, H / 2 - 30 + i * 27));
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
+    ctx.fillText("▶ スペース / タップ でスタート", W / 2, H / 2 + 118);
+    ctx.textAlign = "left";
+  }
+
+  function drawDead() {
+    overlay();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff7080";
+    ctx.font = "bold 48px sans-serif";
+    ctx.fillText("ゲームオーバー", W / 2, H / 2 - 40);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.fillText("距離 " + score + " m", W / 2, H / 2 + 14);
+    ctx.fillStyle = "#c8cdf0";
+    ctx.font = "18px sans-serif";
+    ctx.fillText("ベスト " + best + " m", W / 2, H / 2 + 46);
+    if (time - deadAt > 0.4) {
+      ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
+      ctx.font = "bold 22px sans-serif";
+      ctx.fillText("▶ スペース / タップ でリトライ", W / 2, H / 2 + 96);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function overlay() {
+    ctx.fillStyle = "rgba(10,12,28,0.6)";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------------------------------------------------------------------------
+  // メインループ（固定タイムステップ）
+  // ---------------------------------------------------------------------------
+  let lastT = performance.now();
+  let acc = 0;
+  const STEP = 1 / 120;
+
+  function loop(now) {
+    let frame = (now - lastT) / 1000;
+    lastT = now;
+    if (frame > 0.25) frame = 0.25;
+    acc += frame;
+    while (acc >= STEP) { update(STEP); acc -= STEP; }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

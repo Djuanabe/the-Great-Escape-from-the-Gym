@@ -1,0 +1,10 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log
+
+# dependencies (if ever added)
+node_modules/
+
+# Claude Code worktrees
+.claude/worktrees/
