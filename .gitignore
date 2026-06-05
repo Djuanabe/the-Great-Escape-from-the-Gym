@@ -6,5 +6,8 @@ Thumbs.db
 # dependencies (if ever added)
 node_modules/
 
+# build artifacts (itch.io upload zip, etc.)
+*.zip
+
 # Claude Code worktrees
 .claude/worktrees/
