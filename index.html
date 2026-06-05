@@ -35,7 +35,7 @@
 <div id="wrap">
   <canvas id="cv" width="960" height="540"></canvas>
 </div>
-<div id="hint">スペース / クリック / タップ で操作</div>
+<div id="hint">スペース / クリック / タップ で操作　｜　Space / Click / Tap to play　（P / Esc: 一時停止 Pause）</div>
 
 <script>
 "use strict";
@@ -130,6 +130,7 @@
   let holding;          // 物理的にボタンが押されているか
   let charge;
   let chargeLocked;     // チャージ上限に達して自動解放された状態
+  let paused = false;   // 一時停止中か（プレイ中のみ）
   let shakeT;
   let camX = 0;         // カメラのワールドx（描画原点）
   let deadAt = -1;
@@ -152,12 +153,13 @@
       onGround: true, alive: true, nearGround: true,
       ballColor: COL_ORANGE
     };
-    camX = player.x - CAM_ANCHOR;
+    camX = player.x - CAM_ANCHOR / ZOOM;
     time = 0;
     score = 0;
     holding = false;
     charge = 0;
     chargeLocked = false;
+    paused = false;
     shakeT = 0;
     ensureGenerated(player.x + SEG_W * 2);
   }
@@ -298,6 +300,7 @@
     ensureAudio(); // ユーザー操作のタイミングで音声を有効化
     if (state === "title") { startGame(); return; }
     if (state === "dead") { if (time - deadAt > 0.4) startGame(); return; }
+    if (paused) return; // 一時停止中はゲーム操作を受け付けない
     if (!player.onGround && !player.nearGround) {
       // 高い空中での押下：ボールの色を切り替える（壁すり抜け用）
       player.ballColor = player.ballColor === COL_ORANGE ? COL_BLACK : COL_ORANGE;
@@ -311,21 +314,47 @@
     if (state === "play") { holding = false; chargeLocked = false; }
   }
 
+  // 一時停止トグル（プレイ中のみ）
+  const PAUSE_BTN = { x: W - 52, y: 14, w: 38, h: 38 };
+  function togglePause() {
+    if (state !== "play") return;
+    paused = !paused;
+    if (paused) { holding = false; stopChargeTone(); }
+  }
+  function inPauseBtn(x, y) {
+    return x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w
+        && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
+  }
+  // クライアント座標 → キャンバス座標（CSS拡大に対応）
+  function evToCanvas(e) {
+    const r = cv.getBoundingClientRect();
+    const src = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return { x: (src.clientX - r.left) * (W / r.width),
+             y: (src.clientY - r.top) * (H / r.height) };
+  }
+  function pointerDown(e) {
+    const pt = evToCanvas(e);
+    if (state === "play" && inPauseBtn(pt.x, pt.y)) { togglePause(); return; }
+    press();
+  }
+
   window.addEventListener("keydown", function (e) {
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); if (!e.repeat) press(); }
+    else if (e.code === "KeyP" || e.code === "Escape") { e.preventDefault(); if (!e.repeat) togglePause(); }
   });
   window.addEventListener("keyup", function (e) {
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); release(); }
   });
-  cv.addEventListener("mousedown", function (e) { e.preventDefault(); press(); });
+  cv.addEventListener("mousedown", function (e) { e.preventDefault(); pointerDown(e); });
   window.addEventListener("mouseup", function () { release(); });
-  cv.addEventListener("touchstart", function (e) { e.preventDefault(); press(); }, { passive: false });
+  cv.addEventListener("touchstart", function (e) { e.preventDefault(); pointerDown(e); }, { passive: false });
   window.addEventListener("touchend", function (e) { e.preventDefault(); release(); }, { passive: false });
 
   // ---------------------------------------------------------------------------
   // 更新
   // ---------------------------------------------------------------------------
   function update(dt) {
+    if (state === "play" && paused) return; // 一時停止中はフリーズ（時間も進めない）
     time += dt;
     if (state !== "play") return;
 
@@ -570,6 +599,7 @@
     drawHUD();
     if (state === "title") drawTitle();
     if (state === "dead")  drawDead();
+    if (state === "play" && paused) drawPause();
   }
 
   function drawParallax(camX) {
@@ -780,22 +810,15 @@
     ctx.fillStyle = "#3a2710";
     ctx.font = "bold 26px sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText("距離 " + score + " m", 20, 38);
+    ctx.fillText("DISTANCE " + score + " m", 20, 38);
     ctx.font = "16px sans-serif";
     ctx.fillStyle = "#7a6033";
-    ctx.fillText("ベスト " + best + " m", 22, 60);
+    ctx.fillText("BEST " + best + " m", 22, 60);
 
     if (state === "play") {
-      // 現在のボール色インジケータ（空中の押下で切り替わる）
-      const pal = PALETTE[player.ballColor] || PALETTE.orange;
-      const ix = 30, iy = 86, ir = 12;
-      ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2);
-      ctx.fillStyle = pal.main; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.stroke();
-      ctx.fillStyle = "#3a2710"; ctx.font = "13px sans-serif"; ctx.textAlign = "left";
-      ctx.fillText("現在の色（空中でタップして切替）", ix + 20, iy + 4);
+      drawPauseButton();
 
-      const mw = 180, mh = 14, mx = W - mw - 24, my = 28;
+      const mw = 180, mh = 14, mx = W - mw - 64, my = 28;
       const lockedHold = chargeLocked && holding;                       // 押しっぱなしで再チャージ不可
       const airborneDisabled = holding && !player.nearGround && !chargeLocked;
       ctx.fillStyle = "rgba(60,40,16,0.18)";
@@ -817,6 +840,35 @@
       ctx.fillText(label, mx - 8, my + 12);
       ctx.textAlign = "left";
     }
+  }
+
+  function drawPauseButton() {
+    const b = PAUSE_BTN;
+    ctx.fillStyle = "rgba(58,39,16,0.18)";
+    roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill();
+    ctx.fillStyle = "#3a2710";
+    if (!paused) {
+      ctx.fillRect(b.x + 11, b.y + 10, 5, 18); // ❙❙ 一時停止
+      ctx.fillRect(b.x + 22, b.y + 10, 5, 18);
+    } else {
+      ctx.beginPath();                         // ▶ 再生
+      ctx.moveTo(b.x + 13, b.y + 9);
+      ctx.lineTo(b.x + 13, b.y + 29);
+      ctx.lineTo(b.x + 29, b.y + 19);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  function drawPause() {
+    overlay();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 46px sans-serif";
+    ctx.fillText("PAUSED", W / 2, H / 2 - 6);
+    ctx.fillStyle = "#c8cdf0";
+    ctx.font = "18px sans-serif";
+    ctx.fillText("⏸ ボタン / P / Esc で再開  |  Tap ⏸ / P / Esc to resume", W / 2, H / 2 + 34);
+    ctx.textAlign = "left";
   }
 
   function drawTitle() {
@@ -846,17 +898,17 @@
     ctx.textAlign = "center";
     ctx.fillStyle = "#ff7080";
     ctx.font = "bold 48px sans-serif";
-    ctx.fillText("ゲームオーバー", W / 2, H / 2 - 40);
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 40);
     ctx.fillStyle = "#fff";
     ctx.font = "bold 30px sans-serif";
-    ctx.fillText("距離 " + score + " m", W / 2, H / 2 + 14);
+    ctx.fillText("DISTANCE " + score + " m", W / 2, H / 2 + 14);
     ctx.fillStyle = "#c8cdf0";
     ctx.font = "18px sans-serif";
-    ctx.fillText("ベスト " + best + " m", W / 2, H / 2 + 46);
+    ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 46);
     if (time - deadAt > 0.4) {
       ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
       ctx.font = "bold 22px sans-serif";
-      ctx.fillText("▶ スペース / タップ でリトライ", W / 2, H / 2 + 96);
+      ctx.fillText("▶ スペース / タップ でリトライ  |  Space / Tap to retry", W / 2, H / 2 + 96);
     }
     ctx.textAlign = "left";
   }
