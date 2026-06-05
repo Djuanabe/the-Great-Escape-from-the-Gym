@@ -918,19 +918,31 @@
     overlay();
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
-    ctx.font = "bold 52px sans-serif";
-    ctx.fillText("GEG 体育館からの大脱走", W / 2, H / 2 - 70);
-    ctx.font = "18px sans-serif";
-    ctx.fillStyle = "#c8cdf0";
-    const lines = [
-      "地上で長押ししてチャージ・離してバウンド/Press and hold on the ground to charge, then release to bounce",
-      "空中タップでカラーチェンジ/Tap in mid-air to change colors",
-      "同じ色はすり抜け、違う色はぶつかる/Objects of the same color pass through each other, while objects of different colors collide",
+    ctx.font = "bold 48px sans-serif";
+    ctx.fillText("GEG 体育館からの大脱走", W / 2, 150);
+
+    // 各項目を 日本語 / 英語 の2行に分けて表示（横はみ出し防止）
+    const items = [
+      ["地上で長押しチャージ → 離してバウンド", "Hold on the ground to charge, release to bounce"],
+      ["空中タップでカラーチェンジ", "Tap in mid-air to switch color"],
+      ["同じ色はすり抜け、違う色はぶつかる", "Same color passes through, different color blocks"],
     ];
-    lines.forEach((t, i) => ctx.fillText(t, W / 2, H / 2 - 30 + i * 27));
-    ctx.font = "bold 24px sans-serif";
+    const yBase = 214;
+    items.forEach(function (it, i) {
+      const y = yBase + i * 50;
+      ctx.fillStyle = "#dfe4ff";
+      ctx.font = "16px sans-serif";
+      ctx.fillText(it[0], W / 2, y);
+      ctx.fillStyle = "#a7adda";
+      ctx.font = "13px sans-serif";
+      ctx.fillText(it[1], W / 2, y + 19);
+    });
+
     ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
-    ctx.fillText("▶ スペース / タップ でスタート", W / 2, H / 2 + 118);
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillText("▶ スペース / タップ でスタート", W / 2, 396);
+    ctx.font = "14px sans-serif";
+    ctx.fillText("Space / Tap to start", W / 2, 418);
     ctx.textAlign = "left";
   }
 
