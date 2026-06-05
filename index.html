@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>チャージランナー - 横スクロールアクション</title>
+<title>GEG 体育館からの大脱走</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
@@ -136,7 +136,7 @@
   let deadAt = -1;
 
   // 共有設定：公開URL（itch.io等）。空ならこのページのURLを使う。
-  const SHARE_URL = "";
+  const SHARE_URL = "https://kanai-maru.itch.io/geg";
   let toastMsg = "", toastUntil = 0; // 画面下の一時メッセージ
 
   best = parseInt(localStorage.getItem("cr_best") || "0", 10) || 0;
@@ -919,15 +919,13 @@
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
     ctx.font = "bold 52px sans-serif";
-    ctx.fillText("チャージランナー", W / 2, H / 2 - 70);
+    ctx.fillText("GEG 体育館からの大脱走", W / 2, H / 2 - 70);
     ctx.font = "18px sans-serif";
     ctx.fillStyle = "#c8cdf0";
     const lines = [
-      "ボールは自動で前進し、一定間隔で跳ね続ける",
-      "地上付近で押し続けて減速＆チャージ → 離すと加速ジャンプ",
-      "空中でタップするとボールの色が切り替わる（オレンジ⇔黒）",
-      "色付きの壁は色を合わせればすり抜け／白い壁は跳び越えるしかない",
-      "進むほど色付きの壁が増える。穴も跳び越えよう！",
+      "地上で長押ししてチャージ・離してバウンド/Press and hold on the ground to charge, then release to bounce",
+      "空中タップでカラーチェンジ/Tap in mid-air to change colors",
+      "同じ色はすり抜け、違う色はぶつかる/Objects of the same color pass through each other, while objects of different colors collide",
     ];
     lines.forEach((t, i) => ctx.fillText(t, W / 2, H / 2 - 30 + i * 27));
     ctx.font = "bold 24px sans-serif";
