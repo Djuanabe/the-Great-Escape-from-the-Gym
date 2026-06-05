@@ -135,6 +135,10 @@
   let camX = 0;         // カメラのワールドx（描画原点）
   let deadAt = -1;
 
+  // 共有設定：公開URL（itch.io等）。空ならこのページのURLを使う。
+  const SHARE_URL = "";
+  let toastMsg = "", toastUntil = 0; // 画面下の一時メッセージ
+
   best = parseInt(localStorage.getItem("cr_best") || "0", 10) || 0;
 
   function reset() {
@@ -332,9 +336,36 @@
     return { x: (src.clientX - r.left) * (W / r.width),
              y: (src.clientY - r.top) * (H / r.height) };
   }
+  // 結果画面の共有ボタン
+  const SHARE_BTN = { w: 260, h: 46, x: Math.round(W / 2 - 130), y: Math.round(H / 2 + 116) };
+  function inShareBtn(x, y) {
+    return x >= SHARE_BTN.x && x <= SHARE_BTN.x + SHARE_BTN.w
+        && y >= SHARE_BTN.y && y <= SHARE_BTN.y + SHARE_BTN.h;
+  }
+  function showToast(msg) { toastMsg = msg; toastUntil = time + 2.4; }
+  function shareScore() {
+    const url = SHARE_URL || location.href;
+    const text = "🏀 The Great Escape from the Gym：" + score + "m 走破！ / I escaped " + score + "m!";
+    // 1) Web Share API（主にモバイル）
+    if (navigator.share) {
+      navigator.share({ title: "The Great Escape from the Gym", text: text, url: url }).catch(function () {});
+      return;
+    }
+    // 2) X(Twitter) の投稿画面を開く
+    const intent = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(text) +
+                   "&url=" + encodeURIComponent(url) + "&hashtags=TheGreatEscapeFromTheGym";
+    const w = window.open(intent, "_blank", "noopener,noreferrer");
+    // 3) ポップアップがブロックされたらクリップボードにコピー
+    if (!w) {
+      try { navigator.clipboard.writeText(text + " " + url); showToast("コピーしました / Copied!"); }
+      catch (e) { showToast("共有できませんでした / Could not share"); }
+    }
+  }
+
   function pointerDown(e) {
     const pt = evToCanvas(e);
     if (state === "play" && inPauseBtn(pt.x, pt.y)) { togglePause(); return; }
+    if (state === "dead" && time - deadAt > 0.4 && inShareBtn(pt.x, pt.y)) { shareScore(); return; }
     press();
   }
 
@@ -600,6 +631,18 @@
     if (state === "title") drawTitle();
     if (state === "dead")  drawDead();
     if (state === "play" && paused) drawPause();
+
+    // 一時メッセージ（共有時のフィードバックなど）
+    if (time < toastUntil) {
+      ctx.textAlign = "center";
+      ctx.font = "bold 16px sans-serif";
+      const tw = ctx.measureText(toastMsg).width + 36;
+      ctx.fillStyle = "rgba(20,30,50,0.88)";
+      roundRect(W / 2 - tw / 2, H - 96, tw, 34, 9); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(toastMsg, W / 2, H - 74);
+      ctx.textAlign = "left";
+    }
   }
 
   function drawParallax(camX) {
@@ -908,7 +951,16 @@
     if (time - deadAt > 0.4) {
       ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
       ctx.font = "bold 22px sans-serif";
-      ctx.fillText("▶ スペース / タップ でリトライ  |  Space / Tap to retry", W / 2, H / 2 + 96);
+      ctx.fillText("▶ スペース / タップ でリトライ  |  Space / Tap to retry", W / 2, H / 2 + 90);
+
+      // SNS シェアボタン
+      const b = SHARE_BTN;
+      ctx.fillStyle = "rgba(90,180,255,0.22)";
+      roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill();
+      ctx.strokeStyle = "#78dcff"; ctx.lineWidth = 2;
+      roundRect(b.x, b.y, b.w, b.h, 12); ctx.stroke();
+      ctx.fillStyle = "#e6f6ff"; ctx.font = "bold 18px sans-serif";
+      ctx.fillText("📣 結果をシェア / Share", W / 2, b.y + 29);
     }
     ctx.textAlign = "left";
   }
