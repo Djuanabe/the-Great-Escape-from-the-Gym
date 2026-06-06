@@ -89,7 +89,9 @@
   const MIN_WALL_H   = 22;
   const MAX_AMPL     = 78;
   const ISLAND_HOLE_MIN = 230;     // 浮島を置く穴幅の絶対下限(px)
-  const ISLAND_HOLE_FRAC = 0.70;   // 浮島は「最大級の穴」だけに。速度×この比率より広い穴のみ
+  // 浮島は「最大級の穴」だけに置く。穴の最大幅は ≒ 速度×滞空時間(2*BASE_VY/G≒0.575) なので、
+  // それより小さい比率にしないと条件を満たさず浮島が出なくなる点に注意。
+  const ISLAND_HOLE_FRAC = 0.50;
   const ISLAND_W     = 66;         // 浮島の幅(px)
   const ISLAND_H     = 26;         // 浮島の厚み（描画用, px）
 
