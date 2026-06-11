@@ -42,7 +42,14 @@
 (function () {
   const cv = document.getElementById("cv");
   const ctx = cv.getContext("2d");
-  const W = cv.width, H = cv.height;
+  const W = cv.width, H = cv.height; // 論理サイズ（ゲームロジックはこの座標系のまま）
+
+  // HiDPI（Retina）対応：バッキングストアを DPR 倍にして ctx を逆スケール
+  // → ゲーム内座標は 960×540 のまま、物理ピクセルは DPR 倍になり鮮明に描画される
+  const DPR = window.devicePixelRatio || 1;
+  cv.width  = W * DPR;
+  cv.height = H * DPR;
+  ctx.scale(DPR, DPR);
 
   // ---------------------------------------------------------------------------
   // 物理・ゲーム定数
