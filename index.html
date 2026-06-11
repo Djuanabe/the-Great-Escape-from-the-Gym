@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>GEG 体育館からの大脱走</title>
+<title>Bound</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
@@ -95,15 +95,23 @@
   const ISLAND_W     = 66;         // 浮島の幅(px)
   const ISLAND_H     = 26;         // 浮島の厚み（描画用, px）
 
+  // 御褒美のスター：ゴーストの軌道上のランダムな位置に置く（軌道上なので必ず取れる）
+  const ITEM_R         = 9;        // スターの見た目半径(px)
+  const ITEM_COLLECT_R = 34;       // 取得判定の半径（集めやすめ）
+  const STAR_CHANCE    = 0.35;     // 各アークにスターを置く確率
+
   // 壁・移動壁が「色付き（すり抜け可能）」になる確率。進行するほど増える。
   const COLORED_BASE = 0.12;       // 序盤の色付き割合（残りは白＝すり抜け不可）
   const COLORED_RATE = 0.00006;    // 距離あたりの増加
   const COLORED_MAX  = 0.85;       // 色付き割合の上限
 
-  // 妨害要素どうしの最低間隔（序盤は広く、進むほど詰まる）
-  const SPACING_START = 1050;      // 序盤の最低間隔(px)
-  const SPACING_MIN   = 170;       // 最終的な最低間隔(px)
-  const SPACING_SHRINK= 0.058;     // 距離あたりの間隔縮小量
+  // 妨害要素どうしの最低間隔は「反応時間(秒)」で管理する（px固定ではなく速度に追従）。
+  // 〜2000m は GAP_TIME_SOLO 一定で「目の前の1個ずつ対応」できる余裕を保証。
+  // 2000m→6000m で徐々に短縮し、前のジャンプ中に次を仕込む＝先読みが要る難易度へ。
+  const GAP_TIME_SOLO = 1.4;       // 〜2000m の障害物間の反応時間(秒)
+  const GAP_TIME_MIN  = 0.6;       // 6000m以降の反応時間(秒)
+  const GAP_PHASE1_X  = 20000;     // 2000m（ここまではSOLO一定）
+  const GAP_PHASE2_X  = 60000;     // 6000m（ここでMINに到達）
 
   // ---------------------------------------------------------------------------
   // シード付き乱数 (mulberry32) — 再現可能なステージ生成のため
@@ -124,6 +132,8 @@
   let rng;              // 生成用乱数
   let ghost;            // ステージ生成用の通過可能ゴースト
   let obstacles;
+  let items;             // 御褒美＆道しるべのスター（正解の軌道上に配置）
+  let starsCollected;    // 取得したスター数
   let generatedUpToX;
   let lastObstacleX;    // 直前に置いた妨害要素のx（間隔制御用）
   let player;
@@ -131,7 +141,6 @@
   let score, best;
   let holding;          // 物理的にボタンが押されているか
   let charge;
-  let chargeLocked;     // チャージ上限に達して自動解放された状態
   let paused = false;   // 一時停止中か（プレイ中のみ）
   let shakeT;
   let camX = 0;         // カメラのワールドx（描画原点）
@@ -152,6 +161,8 @@
     rng = mulberry32(seed);
     ghost = { x: 0 };
     obstacles = [];
+    items = [];
+    starsCollected = 0;
     generatedUpToX = 0;
     lastObstacleX = -Infinity;
     player = {
@@ -164,7 +175,6 @@
     score = 0;
     holding = false;
     charge = 0;
-    chargeLocked = false;
     paused = false;
     shakeT = 0;
     ensureGenerated(player.x + SEG_W * 2);
@@ -199,7 +209,16 @@
       const landX = x0 + vx * T;
       const apexX = x0 + vx * (vy / G);
       const apexY = GROUND_Y - vy * vy / (2 * G);
-      if (x0 >= START_SAFE_X) placeArcObstacle(x0, landX, apexX, apexY);
+      if (x0 >= START_SAFE_X) {
+        placeArcObstacle(x0, landX, apexX, apexY);
+        // 御褒美スター：このアークの軌道上のランダムな位置に置く（軌道上なので必ず取れる）
+        if (rng() < STAR_CHANCE) {
+          const f = 0.15 + rng() * 0.7;            // 0=離陸点, 0.5=頂点, 1=着地点
+          const sx = x0 + (landX - x0) * f;
+          const sy = GROUND_Y - 4 * (GROUND_Y - apexY) * f * (1 - f); // 放物線上の高さ
+          addGuideStar(sx, sy);
+        }
+      }
       ghost.x = landX;
     }
     generatedUpToX = segEnd;
@@ -220,8 +239,15 @@
     const globalBase = MARGIN_BASE - dist * MARGIN_SHRINK;   // 距離による全体の縮小
     const margin = Math.max(MARGIN_MIN, globalBase - winProg * WINDOW_NARROW);
 
-    // 妨害要素どうしの最低間隔を確保（序盤は広い）
-    const spacing = Math.max(SPACING_MIN, SPACING_START - dist * SPACING_SHRINK);
+    // 妨害要素どうしの最低間隔＝反応時間×現在速度。
+    // 序盤は1.4秒（着地→次を見て→必要ならチャージ、まで毎回間に合う＝1個ずつ対応）、
+    // 2000m以降6000mへ向けて0.6秒まで短縮（前のジャンプ中に次を仕込む＝先読み要）。
+    let gapT;
+    if (dist <= GAP_PHASE1_X) gapT = GAP_TIME_SOLO;
+    else if (dist >= GAP_PHASE2_X) gapT = GAP_TIME_MIN;
+    else gapT = GAP_TIME_SOLO + (GAP_TIME_MIN - GAP_TIME_SOLO) *
+               (dist - GAP_PHASE1_X) / (GAP_PHASE2_X - GAP_PHASE1_X);
+    const spacing = runSpeedAt(x0) * gapT;
     if (x0 - lastObstacleX < spacing) return;
 
     // 距離が進むほど障害物の出現確率が上がる
@@ -269,6 +295,11 @@
     }
   }
 
+  // 御褒美スターを追加（少し上に浮かせて見やすく）
+  function addGuideStar(x, y) {
+    items.push({ x: x, y: y - 6 });
+  }
+
   // ---------------------------------------------------------------------------
   // 地形クエリ
   // ---------------------------------------------------------------------------
@@ -314,10 +345,9 @@
       return;
     }
     holding = true;
-    chargeLocked = false; // 新しく押し直したらチャージ可能に戻す
   }
   function release() {
-    if (state === "play") { holding = false; chargeLocked = false; }
+    if (state === "play") holding = false;
   }
 
   // 一時停止トグル（プレイ中のみ）
@@ -347,7 +377,7 @@
   function showToast(msg) { toastMsg = msg; toastUntil = time + 2.4; }
   function shareScore() {
     const url = SHARE_URL || location.href;
-    const text = "🏀 The Great Escape from the Gym：" + score + "m 走破！ / I escaped " + score + "m!";
+    const text = "🏀 The Great Escape from the Gym：" + score + "m 走破！★" + starsCollected + " / I escaped " + score + "m! (★" + starsCollected + ")";
     // 1) Web Share API（主にモバイル）
     if (navigator.share) {
       navigator.share({ title: "The Great Escape from the Gym", text: text, url: url }).catch(function () {});
@@ -392,15 +422,13 @@
     if (state !== "play") return;
 
     const p = player;
-    const holdNow = holding && !chargeLocked; // 実効的な「押している」状態
 
     // チャージが有効なのは「接地中」か「着地に向けて降下中で地面に近い」ときだけ。
     // 高い空中ではボタンは無効（何も溜まらない）。
     p.nearGround = p.onGround || (p.vy >= 0 && (GROUND_Y - p.y) <= NEAR_GROUND_H);
-    const canCharge = holdNow && p.nearGround;
+    const canCharge = holding && p.nearGround;
     if (canCharge) {
-      charge += dt / CHARGE_TIME;
-      if (charge >= CHARGE_MAX) { charge = CHARGE_MAX; chargeLocked = true; } // 上限で自動解放
+      charge = Math.min(CHARGE_MAX, charge + dt / CHARGE_TIME);
     }
 
     // チャージ音（溜まるほど音階が上がる）。チャージしていない間は止める。
@@ -408,14 +436,15 @@
     else { stopChargeTone(); }
 
     if (p.onGround) {
-      if (holdNow) {
+      if (holding && charge < CHARGE_MAX) {
         // チャージ中は一定速度で前進。フルチャージ(CHARGE_TIME)でちょうど
         // 通常ジャンプ1回分の飛距離（= runSpeed × 滞空時間）だけ進むよう速度を設定。
         const jumpDist = runSpeedAt(p.x) * (2 * BASE_VY / G);
         p.vx = jumpDist / CHARGE_TIME;
         p.y = GROUND_Y; p.vy = 0;
       } else if (charge > 0) {
-        // チャージ解放ジャンプ（離した瞬間に即発射）
+        // チャージ解放ジャンプ（離した瞬間 or 上限到達で自動解放）。
+        // 押しっぱなしでもチャージはリセットされ、着地後また0から溜まる。
         launch(charge);
       } else {
         // 着地後すぐの自動ジャンプ（チャージなし）。連続して跳ね続ける。
@@ -446,6 +475,19 @@
 
     const cutoff = p.x - SEG_W;
     while (obstacles.length && obstacleRight(obstacles[0]) < cutoff) obstacles.shift();
+    while (items.length && items[0].x < cutoff) items.shift();
+
+    // 道しるべスターの取得判定（ボール中心との距離で判定。集めやすめに余裕を持たせる）
+    const bcx = p.x, bcy = p.y - BALL_R;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      const dx = it.x - bcx, dy = it.y - bcy;
+      if (dx * dx + dy * dy < ITEM_COLLECT_R * ITEM_COLLECT_R) {
+        items.splice(i, 1);
+        starsCollected++;
+        playCoin();
+      }
+    }
 
     score = Math.floor(p.x / 10);
     if (shakeT > 0) shakeT -= dt;
@@ -472,8 +514,7 @@
     // チャージ分はそのジャンプ限りの加速（慣性として蓄積しない）。基本速度は進行で緩やかに上昇。
     p.vx = runSpeedAt(p.x) + c * BOOST_MAX;
     p.onGround = false;
-    charge = 0;            // ジャンプしたらチャージはリセット
-    chargeLocked = true;   // 押しっぱなしでは再チャージしない（押し直しで解除）
+    charge = 0;            // ジャンプしたらチャージはリセット（押しっぱなしでも）
     stopChargeTone();
     playJump(c);           // ジャンプ音（チャージが大きいほど高め）
   }
@@ -597,6 +638,21 @@
     o.connect(g).connect(actx.destination);
     o.start(); o.stop(actx.currentTime + 0.5);
   }
+  function playCoin() {
+    if (!actx) return;
+    // 明るい2音のチャイム（取得の気持ちよさ）
+    var t0 = actx.currentTime;
+    [988, 1319].forEach(function (f, i) {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(f, t0 + i * 0.05);
+      g.gain.setValueAtTime(0.0001, t0 + i * 0.05);
+      g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.05 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.05 + 0.16);
+      o.connect(g).connect(actx.destination);
+      o.start(t0 + i * 0.05); o.stop(t0 + i * 0.05 + 0.18);
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // 描画
@@ -625,6 +681,7 @@
 
     drawGround(cam);
     drawObstacles(cam);
+    drawItems(cam);
     drawPlayer();
 
     ctx.restore();
@@ -781,6 +838,38 @@
     }
   }
 
+  // 道しるべスター（正解の軌道上に光る）
+  function drawItems(camX) {
+    const x0 = camX - 40, x1 = camX + W / ZOOM + 40;
+    const pulse = 0.5 + 0.5 * Math.sin(time * 6);
+    for (const it of items) {
+      if (it.x < x0 || it.x > x1) continue;
+      ctx.save();
+      ctx.translate(it.x, it.y);
+      // 後光
+      ctx.fillStyle = "rgba(255, 226, 120, " + (0.20 + 0.18 * pulse) + ")";
+      ctx.beginPath();
+      ctx.arc(0, 0, ITEM_R * (1.9 + 0.4 * pulse), 0, Math.PI * 2);
+      ctx.fill();
+      // 星
+      ctx.rotate(time * 1.5);
+      ctx.beginPath();
+      for (let k = 0; k < 10; k++) {
+        const ang = Math.PI / 5 * k - Math.PI / 2;
+        const r = (k % 2 === 0) ? ITEM_R : ITEM_R * 0.45;
+        const px = Math.cos(ang) * r, py = Math.sin(ang) * r;
+        if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#ffd23a";
+      ctx.fill();
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = "#7a4a00";
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   const BALL_R = 16; // バスケットボールの半径
   function drawPlayer() {
     const p = player;
@@ -793,9 +882,7 @@
 
     // チャージのグロー
     if (charge > 0) {
-      ctx.fillStyle = chargeLocked
-        ? `rgba(255,160,120,0.7)`
-        : `rgba(120,220,255,${0.3 + charge * 0.5})`;
+      ctx.fillStyle = `rgba(120,220,255,${0.3 + charge * 0.5})`;
       ctx.beginPath();
       ctx.arc(p.x, p.y - BALL_R, BALL_R * (1.25 + charge * 0.7), 0, Math.PI * 2);
       ctx.fill();
@@ -859,19 +946,18 @@
     ctx.font = "16px sans-serif";
     ctx.fillStyle = "#7a6033";
     ctx.fillText("BEST " + best + " m", 22, 60);
+    ctx.fillStyle = "#9a6b00";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillText("★ " + starsCollected, 22, 84);
 
     if (state === "play") {
       drawPauseButton();
 
       const mw = 180, mh = 14, mx = W - mw - 64, my = 28;
-      const lockedHold = chargeLocked && holding;                       // 押しっぱなしで再チャージ不可
-      const airborneDisabled = holding && !player.nearGround && !chargeLocked;
+      const airborneDisabled = holding && !player.nearGround;
       ctx.fillStyle = "rgba(60,40,16,0.18)";
       roundRect(mx, my, mw, mh, 7); ctx.fill();
-      if (lockedHold) {
-        ctx.fillStyle = "#ff9a6a"; // ロック中：オレンジ点滅（放すまで再チャージ不可）
-        if ((time * 8) % 2 < 1) { roundRect(mx, my, mw, mh, 7); ctx.fill(); }
-      } else if (!airborneDisabled) {
+      if (!airborneDisabled) {
         const grd = ctx.createLinearGradient(mx, 0, mx + mw, 0);
         grd.addColorStop(0, "#5ad6c0");
         grd.addColorStop(1, "#78dcff");
@@ -881,8 +967,7 @@
       ctx.fillStyle = airborneDisabled ? "#9a8048" : "#6b5126";
       ctx.font = "13px sans-serif";
       ctx.textAlign = "right";
-      const label = lockedHold ? "放して！" : (airborneDisabled ? "空中（無効）" : "チャージ");
-      ctx.fillText(label, mx - 8, my + 12);
+      ctx.fillText(airborneDisabled ? "空中（無効）" : "チャージ", mx - 8, my + 12);
       ctx.textAlign = "left";
     }
   }
@@ -921,7 +1006,7 @@
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
     ctx.font = "bold 48px sans-serif";
-    ctx.fillText("GEG 体育館からの大脱走", W / 2, 150);
+    ctx.fillText("Bound", W / 2, 150);
 
     // 各項目を 日本語 / 英語 の2行に分けて表示（横はみ出し防止）
     const items = [
@@ -959,7 +1044,10 @@
     ctx.fillText("DISTANCE " + score + " m", W / 2, H / 2 + 14);
     ctx.fillStyle = "#c8cdf0";
     ctx.font = "18px sans-serif";
-    ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 46);
+    ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 44);
+    ctx.fillStyle = "#ffd23a";
+    ctx.font = "bold 20px sans-serif";
+    ctx.fillText("★ " + starsCollected, W / 2, H / 2 + 72);
     if (time - deadAt > 0.4) {
       ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
       ctx.font = "bold 22px sans-serif";
