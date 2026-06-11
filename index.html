@@ -301,13 +301,6 @@
       const apexY = GROUND_Y - vy * vy / (2 * G);
       if (x0 >= START_SAFE_X) {
         placeArcObstacle(x0, landX, apexX, apexY);
-        // 御褒美スター：このアークの軌道上のランダムな位置に置く（軌道上なので必ず取れる）
-        if (rng() < STAR_CHANCE_MIN + (STAR_CHANCE_MAX - STAR_CHANCE_MIN) * Math.min(1, x0 / STAR_CHANCE_FULL)) {
-          const f = 0.15 + rng() * 0.7;            // 0=離陸点, 0.5=頂点, 1=着地点
-          const sx = x0 + (landX - x0) * f;
-          const sy = GROUND_Y - 4 * (GROUND_Y - apexY) * f * (1 - f); // 放物線上の高さ
-          addGuideStar(sx, sy);
-        }
       }
       ghost.x = landX;
     }
@@ -366,12 +359,16 @@
       }
       obstacles.push(hole);
       lastObstacleX = landX;
+      // 穴の上空（アーク頂点付近）に配置
+      tryPlaceStar(x0, landX, apexY, (hx1 + hx2) / 2);
     } else if (t < wWall) {
       // 資材倉庫など：tallWall の確率で「跳び越え不能な白壁」（破壊専用）を置く
       if (rng() < scN("tallWall", 0)) {
         const h = clearance + 50 + rng() * 60;
         obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: COL_WHITE, breakable: true });
         lastObstacleX = apexX + 14;
+        // 壁の少し手前（助走側）に配置
+        tryPlaceStar(x0, landX, apexY, apexX - 35);
         return;
       }
       const h = Math.min(clearance - margin, scN("wallMaxH", MAX_WALL_H));
@@ -379,6 +376,8 @@
         const color = pickWallColor(dist);
         obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: color });
         lastObstacleX = apexX + 14;
+        // 壁の真上（軌道がギリギリ越える高さ）に配置
+        tryPlaceStar(x0, landX, apexY, apexX);
       }
     } else {
       const ampl = Math.min(MAX_AMPL * scN("moverAmpl", 1), (28 + dist * 0.004) * scN("moverAmpl", 1));
@@ -393,12 +392,23 @@
         color: color
       });
       lastObstacleX = apexX + 17;
+      // 移動壁のギャップ中心（軌道が通過する位置）に配置
+      tryPlaceStar(x0, landX, apexY, apexX);
     }
   }
 
   // 御褒美スターを追加（少し上に浮かせて見やすく）
   function addGuideStar(x, y) {
     items.push({ x: x, y: y - 6 });
+  }
+
+  // 障害物の近くにスターを置く（放物線上の sx に配置。確率は距離依存）
+  function tryPlaceStar(x0, landX, apexY, sx) {
+    const chance = STAR_CHANCE_MIN + (STAR_CHANCE_MAX - STAR_CHANCE_MIN) * Math.min(1, x0 / STAR_CHANCE_FULL);
+    if (rng() >= chance) return;
+    const f = (sx - x0) / (landX - x0);
+    const sy = GROUND_Y - 4 * (GROUND_Y - apexY) * f * (1 - f);
+    addGuideStar(sx, sy);
   }
 
   // ---------------------------------------------------------------------------
