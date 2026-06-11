@@ -98,7 +98,9 @@
   // 御褒美のスター：ゴーストの軌道上のランダムな位置に置く（軌道上なので必ず取れる）
   const ITEM_R         = 9;        // スターの見た目半径(px)
   const ITEM_COLLECT_R = 34;       // 取得判定の半径（集めやすめ）
-  const STAR_CHANCE    = 0.35;     // 各アークにスターを置く確率
+  const STAR_CHANCE_MIN = 0.15;    // 星の出現確率（序盤）
+  const STAR_CHANCE_MAX = 0.85;    // 星の出現確率（10000m以降）
+  const STAR_CHANCE_FULL = 100000; // 最大確率に達するx座標（10000m）
 
   // 壁・移動壁が「色付き（すり抜け可能）」になる確率。進行するほど増える。
   const COLORED_BASE = 0.12;       // 序盤の色付き割合（残りは白＝すり抜け不可）
@@ -212,7 +214,7 @@
       if (x0 >= START_SAFE_X) {
         placeArcObstacle(x0, landX, apexX, apexY);
         // 御褒美スター：このアークの軌道上のランダムな位置に置く（軌道上なので必ず取れる）
-        if (rng() < STAR_CHANCE) {
+        if (rng() < STAR_CHANCE_MIN + (STAR_CHANCE_MAX - STAR_CHANCE_MIN) * Math.min(1, x0 / STAR_CHANCE_FULL)) {
           const f = 0.15 + rng() * 0.7;            // 0=離陸点, 0.5=頂点, 1=着地点
           const sx = x0 + (landX - x0) * f;
           const sy = GROUND_Y - 4 * (GROUND_Y - apexY) * f * (1 - f); // 放物線上の高さ
@@ -847,7 +849,7 @@
       ctx.save();
       ctx.translate(it.x, it.y);
       // 後光
-      ctx.fillStyle = "rgba(255, 226, 120, " + (0.20 + 0.18 * pulse) + ")";
+      ctx.fillStyle = "rgba(0, 0, 0, " + (0.12 + 0.10 * pulse) + ")";
       ctx.beginPath();
       ctx.arc(0, 0, ITEM_R * (1.9 + 0.4 * pulse), 0, Math.PI * 2);
       ctx.fill();
@@ -861,10 +863,10 @@
         if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       ctx.closePath();
-      ctx.fillStyle = "#ffd23a";
+      ctx.fillStyle = "#111111";
       ctx.fill();
       ctx.lineWidth = 1.6;
-      ctx.strokeStyle = "#7a4a00";
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
       ctx.stroke();
       ctx.restore();
     }
@@ -946,7 +948,7 @@
     ctx.font = "16px sans-serif";
     ctx.fillStyle = "#7a6033";
     ctx.fillText("BEST " + best + " m", 22, 60);
-    ctx.fillStyle = "#9a6b00";
+    ctx.fillStyle = "#111111";
     ctx.font = "bold 16px sans-serif";
     ctx.fillText("★ " + starsCollected, 22, 84);
 
@@ -967,7 +969,7 @@
       ctx.fillStyle = airborneDisabled ? "#9a8048" : "#6b5126";
       ctx.font = "13px sans-serif";
       ctx.textAlign = "right";
-      ctx.fillText(airborneDisabled ? "空中（無効）" : "チャージ", mx - 8, my + 12);
+      ctx.fillText(airborneDisabled ? "Charge" : "Charge", mx - 8, my + 12);
       ctx.textAlign = "left";
     }
   }
@@ -1045,7 +1047,7 @@
     ctx.fillStyle = "#c8cdf0";
     ctx.font = "18px sans-serif";
     ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 44);
-    ctx.fillStyle = "#ffd23a";
+    ctx.fillStyle = "#111111";
     ctx.font = "bold 20px sans-serif";
     ctx.fillText("★ " + starsCollected, W / 2, H / 2 + 72);
     if (time - deadAt > 0.4) {
