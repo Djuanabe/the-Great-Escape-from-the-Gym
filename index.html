@@ -230,6 +230,86 @@
   const SHARE_URL = "https://kanai-maru.itch.io/geg";
   let toastMsg = "", toastUntil = 0; // 画面下の一時メッセージ
 
+  // ---------------------------------------------------------------------------
+  // チュートリアル（初プレイ時に自動で開始。タイトルからも再生可能）
+  //   固定コースをゾーンに区切り、ゾーンごとにガイド文を表示。
+  //   ミスしてもゲームオーバーにせず、そのゾーンの手前へ戻してやり直し。
+  // ---------------------------------------------------------------------------
+  const TUT_DONE_KEY = "cr_tut";
+  let tut = null; // null=通常プレイ / {doneAt} チュートリアル中
+  // 各ゾーン：until=ゾーン終端x, respawn=ミス時の復帰x, マーカー表示位置 mark
+  const TUT_ZONES = [
+    { until: 1220, respawn: 60,   mark: 1110,
+      jp: "穴だ！ 手前で長押しチャージ → 離して大ジャンプ（押している間は地面を滑走）",
+      en: "Hole ahead! Hold to charge (you glide), release to leap" },
+    { until: 1928, respawn: 1300, mark: 1914,
+      jp: "次は壁。チャージすると低く跳ぶので溜めすぎ注意。滑走で位置を調節し、壁の手前から素直に跳び越えよう",
+      en: "A wall. Charging makes jumps LOWER — land short of it, then bounce over" },
+    { until: 2834, respawn: 2300, mark: 2817,
+      jp: "低い隙間が来る。しっかりチャージして、低空ジャンプでくぐり抜けろ",
+      en: "Low gap! Charge up for a low, fast jump to slip through" },
+    { until: 3728, respawn: 3200, mark: 3714,
+      jp: "黒い壁は跳び越えられない。空中でタップして黒にチェンジ → 同じ色はすり抜け！",
+      en: "Black wall — can't jump it. Tap mid-air to turn black and phase through!" },
+    { until: 4400, respawn: 3900, mark: -1,
+      jp: "完璧！ この調子でどこまでも跳ねていこう",
+      en: "Perfect! Keep bouncing as far as you can" }
+  ];
+  function tutZoneIdx() {
+    for (let i = 0; i < TUT_ZONES.length; i++) {
+      if (player.x <= TUT_ZONES[i].until) return i;
+    }
+    return TUT_ZONES.length - 1;
+  }
+
+  function buildTutorialCourse() {
+    obstacles.length = 0;
+    items.length = 0;
+    generatedUpToX = 1e9; // ランダム生成を完全に止める
+    // 1) 穴（チャージジャンプの練習。幅220pxはノーチャージではほぼ届かない）
+    obstacles.push({ type: "hole", x1: 1000, x2: 1220 });
+    // 2) 白壁（ノーチャージで跳べる高さ。溜めすぎると低くて当たる）
+    obstacles.push({ type: "wall", x: 1900, w: 28, h: 90, color: COL_WHITE });
+    // 3) 低い隙間（ゆっくり上下。ノーチャージだと高すぎて上に当たる）
+    obstacles.push({ type: "mover", x: 2800, w: 34,
+                     center: GROUND_Y - 75, ampl: 12, gapH: 130,
+                     phase: 0, speed: 0.8, color: COL_WHITE });
+    // 4) 黒い高壁（跳び越え不能。カラーチェンジ必須）
+    obstacles.push({ type: "wall", x: 3700, w: 28, h: 280, color: COL_BLACK });
+  }
+
+  function startTutorial() {
+    stage = STAGES[0];
+    best = bests[stage.id] || 0;
+    initRun(0xC0FFEE);
+    buildTutorialCourse();
+    tut = { doneAt: -1 };
+    state = "play";
+  }
+
+  // ミス時：現在ゾーンの手前へ戻してやり直し（ゲームオーバーにしない）
+  function tutRespawn() {
+    const z = TUT_ZONES[tutZoneIdx()];
+    player.x = z.respawn;
+    player.y = GROUND_Y; player.vy = 0; player.onGround = true;
+    player.ballColor = COL_ORANGE;
+    player.breakJump = false;
+    charge = 0;
+    invulnT = 0.8;
+    shakeT = 0.2;
+    camX = player.x - CAM_ANCHOR / ZOOM;
+    stopChargeTone();
+    playLand();
+    showToast("もう一度！ / Try again!");
+  }
+
+  function finishTutorial() {
+    localStorage.setItem(TUT_DONE_KEY, "1");
+    tut = null;
+    reset();
+    showToast("チュートリアル完了！ / Tutorial complete!");
+  }
+
   best = bests[STAGES[0].id] || 0;
 
   // ステージ設定の取得（未指定ならデフォルト値）
@@ -451,9 +531,15 @@
   // ---------------------------------------------------------------------------
   // 入力
   // ---------------------------------------------------------------------------
+  // 初プレイならまずチュートリアルへ（完了/スキップ後は通常スタート）
+  function maybeStartGame() {
+    if (!localStorage.getItem(TUT_DONE_KEY)) { startTutorial(); return; }
+    startGame();
+  }
+
   function press() {
     ensureAudio(); // ユーザー操作のタイミングで音声を有効化
-    if (state === "title") { if (stageUnlocked(STAGES[stageSel])) startGame(); return; }
+    if (state === "title") { if (stageUnlocked(STAGES[stageSel])) maybeStartGame(); return; }
     if (state === "skills") return; // スキル画面はクリック/タップで操作
     if (state === "dead") { if (time - deadAt > 0.4) startGame(); return; }
     if (paused) return; // 一時停止中はゲーム操作を受け付けない
@@ -536,6 +622,8 @@
   }
   const BACK_BTN = { x: 20, y: 20, w: 110, h: 38 };
   const MENU_BTN = { w: 200, h: 40, x: Math.round(W / 2 - 100), y: Math.round(H / 2 + 172) };
+  const TUT_BTN  = { x: 20, y: 20, w: 190, h: 36 };               // タイトル：チュートリアル再生
+  const TUT_SKIP_BTN = { x: W - 134, y: H - 54, w: 114, h: 38 }; // チュートリアル中：スキップ（右下）
   function inRect(pt, r) { return pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h; }
 
   function clickSkillRow(i) {
@@ -558,9 +646,11 @@
   function pointerDown(e) {
     const pt = evToCanvas(e);
     if (state === "play" && inPauseBtn(pt.x, pt.y)) { togglePause(); return; }
+    if (state === "play" && tut && inRect(pt, TUT_SKIP_BTN)) { finishTutorial(); return; }
     if (state === "title") {
       ensureAudio();
       if (inRect(pt, SKILLS_BTN)) { state = "skills"; return; }
+      if (inRect(pt, TUT_BTN)) { startTutorial(); return; }
       for (let i = 0; i < STAGES.length; i++) {
         if (inRect(pt, stageCardRect(i))) {
           const st = STAGES[i];
@@ -568,7 +658,7 @@
             const req = SKILLS.find(function (s) { return s.id === st.req; });
             showToast("「" + (req ? req.name : "?") + "」の獲得で解放 / Unlock with " + (req ? req.en : "?"));
           } else if (stageSel === i) {
-            startGame();           // 選択中のカードをもう一度タップでスタート
+            maybeStartGame();      // 選択中のカードをもう一度タップでスタート
           } else {
             stageSel = i; playSwitch();
           }
@@ -676,6 +766,12 @@
 
     checkCollisions();
 
+    // チュートリアル：ゴール到達で完了演出 → 少し待ってタイトルへ
+    if (tut) {
+      if (tut.doneAt < 0 && p.x >= TUT_ZONES[TUT_ZONES.length - 1].until) tut.doneAt = time;
+      if (tut.doneAt >= 0 && time - tut.doneAt > 1.6) { finishTutorial(); return; }
+    }
+
     ensureGenerated(p.x + SEG_W * 2);
 
     const cutoff = p.x - SEG_W;
@@ -768,6 +864,8 @@
 
   function die(killer) {
     if (!player.alive) return;
+    // チュートリアル中はゲームオーバーにせず、ゾーンの手前からやり直し
+    if (tut) { tutRespawn(); return; }
     // リバイブ：1回だけ復活して続行。ミスした時点の色は以後このランで使用不可。
     if (skillOn("revive") && !reviveUsed) {
       reviveUsed = true;
@@ -969,11 +1067,13 @@
     drawGround(cam);
     drawObstacles(cam);
     drawItems(cam);
+    if (tut && state === "play") drawTutMarker();
     drawPlayer();
 
     ctx.restore();
 
     drawHUD();
+    if (tut && state === "play") drawTutorial();
     if (state === "title")  drawTitle();
     if (state === "skills") drawSkills();
     if (state === "dead")   drawDead();
@@ -1308,6 +1408,60 @@
     }
   }
 
+  // チュートリアル：対象障害物の上で跳ねる「▼」マーカー（ワールド座標で描画）
+  function drawTutMarker() {
+    const z = TUT_ZONES[tutZoneIdx()];
+    if (z.mark < 0 || player.x > z.mark) return;
+    const bob = Math.sin(time * 5) * 8;
+    const my = GROUND_Y - 320 + bob;
+    ctx.fillStyle = "rgba(208,74,58,0.95)";
+    ctx.beginPath();
+    ctx.moveTo(z.mark - 16, my);
+    ctx.lineTo(z.mark + 16, my);
+    ctx.lineTo(z.mark, my + 26);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // チュートリアル：上部のガイドバナーとスキップボタン（スクリーン座標で描画）
+  function drawTutorial() {
+    const zi = tutZoneIdx();
+    const z = TUT_ZONES[zi];
+    const done = tut.doneAt >= 0;
+
+    // ガイドバナー
+    const bw = 760, bx = (W - bw) / 2, by = 64;
+    ctx.fillStyle = "rgba(20,30,50,0.82)";
+    roundRect(bx, by, bw, 72, 12); ctx.fill();
+    ctx.strokeStyle = done ? "#5ad6c0" : "#78dcff";
+    ctx.lineWidth = 2;
+    roundRect(bx, by, bw, 72, 12); ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#9fd8ff";
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(done ? "TUTORIAL COMPLETE!" : "TUTORIAL  " + Math.min(zi + 1, 4) + " / 4", W / 2, by + 18);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 15px sans-serif";
+    ctx.fillText(done ? "チュートリアル完了！" : z.jp, W / 2, by + 41);
+    ctx.fillStyle = "#a7adda";
+    ctx.font = "12px sans-serif";
+    ctx.fillText(done ? "Tutorial complete!" : z.en, W / 2, by + 60);
+    ctx.textAlign = "left";
+
+    // スキップボタン（ポーズボタンの左）
+    const b = TUT_SKIP_BTN;
+    ctx.fillStyle = "rgba(58,39,16,0.18)";
+    roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill();
+    ctx.fillStyle = "#3a2710";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("スキップ/Skip", b.x + b.w / 2, b.y + 24);
+    ctx.textAlign = "left";
+  }
+
   function drawPause() {
     overlay();
     ctx.textAlign = "center";
@@ -1336,6 +1490,15 @@
     ctx.fillStyle = "#ffd23a";
     ctx.font = "bold 22px sans-serif";
     ctx.fillText("★ " + starBank, W - 24, 44);
+
+    // チュートリアル再生（左上）
+    const tb = TUT_BTN;
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    roundRect(tb.x, tb.y, tb.w, tb.h, 9); ctx.fill();
+    ctx.fillStyle = "#c8cdf0";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("？ チュートリアル / Tutorial", tb.x + tb.w / 2, tb.y + 23);
 
     // ステージカード（3×2）
     ctx.textAlign = "center";
