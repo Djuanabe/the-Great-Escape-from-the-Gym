@@ -481,7 +481,7 @@
     return x >= SHARE_BTN.x && x <= SHARE_BTN.x + SHARE_BTN.w
         && y >= SHARE_BTN.y && y <= SHARE_BTN.y + SHARE_BTN.h;
   }
-  function showToast(msg) { toastMsg = msg; toastUntil = time + 2.4; }
+  function showToast(msg) { toastMsg = msg; toastUntil = performance.now() + 2400; }
   function shareScore() {
     const url = SHARE_URL || location.href;
     const text = "🏀 The Great Escape from the Gym：" + score + "m 走破！★" + starsCollected + " / I escaped " + score + "m! (★" + starsCollected + ")";
@@ -963,7 +963,7 @@
     if (state === "play" && paused) drawPause();
 
     // 一時メッセージ（共有時のフィードバックなど）
-    if (time < toastUntil) {
+    if (performance.now() < toastUntil) {
       ctx.textAlign = "center";
       ctx.font = "bold 16px sans-serif";
       const tw = ctx.measureText(toastMsg).width + 36;
@@ -1450,7 +1450,7 @@
     ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 44);
     ctx.fillStyle = "#ffd23a";
     ctx.font = "bold 20px sans-serif";
-    ctx.fillText("★ +" + bankedThisRun + "  （貯金 " + starBank + "） / Bank " + starBank, W / 2, H / 2 + 72);
+    ctx.fillText("★ +" + bankedThisRun + "  Total Bank " + starBank, W / 2, H / 2 + 72);
     if (time - deadAt > 0.4) {
       ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
       ctx.font = "bold 20px sans-serif";
