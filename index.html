@@ -116,6 +116,71 @@
   const GAP_PHASE2_X  = 60000;     // 6000m（ここでMINに到達）
 
   // ---------------------------------------------------------------------------
+  // スキル定義（星で購入。購入後はON/OFF切替可能）
+  // ---------------------------------------------------------------------------
+  const SKILLS = [
+    { id: "high",   name: "ハイアーチ",       en: "High Arch",    cost: 15,
+      desc: "チャージジャンプの高度低下が半減（高く跳べる）", en2: "Charged jumps keep more height" },
+    { id: "slow",   name: "エアブレーキ",     en: "Air Brake",    cost: 20,
+      desc: "空中にいる間、時間が少し遅く流れる",             en2: "Time slows while airborne" },
+    { id: "white",  name: "ホワイトチェンジ", en: "White Change", cost: 30,
+      desc: "カラーチェンジで白に変身できる（白とすり抜け）", en2: "Color switch can turn white" },
+    { id: "revive", name: "リバイブ",         en: "Revive",       cost: 40,
+      desc: "1回だけ復活して続行。ただしミス時の色は封印",    en2: "Revive once; that color is sealed after" },
+    { id: "break",  name: "ブレイクチャージ", en: "Break Charge", cost: 50,
+      desc: "チャージが速く短くなり、フルチャージ中は白壁を破壊", en2: "Faster charge; full-charge jump smashes white walls" }
+  ];
+  const BREAK_CHARGE_TIME = 0.45;  // ブレイクチャージ時のフルチャージ時間(秒)
+  const BREAK_GLIDE_FRAC  = 0.625; // 同・チャージ滑走距離の倍率（時間比と同じ＝体感速度は不変）
+  const HIGH_HEIGHT_PEN   = 0.22;  // ハイアーチ時の高度低下率（通常0.45）
+  const SLOW_SCALE        = 0.80;  // エアブレーキ時の時間倍率
+
+  // ---------------------------------------------------------------------------
+  // ステージ定義。req のスキルを所持していると解放。cfg で生成パラメータを上書き。
+  // ---------------------------------------------------------------------------
+  const STAGES = [
+    { id: "gym",   name: "体育館",       en: "Gym",        req: null,
+      hint: "基本のエンドレスコート", cfg: {} },
+    { id: "attic", name: "キャットウォーク", en: "Catwalk",  req: "high",
+      hint: "高い壁だらけ。高度を保って跳び越えろ",
+      cfg: { wHole: 0.28, wWall: 0.78, gapSolo: 1.35, gapMin: 0.7, wallMaxH: 200 } },
+    { id: "clock", name: "時計塔",       en: "Clockwork",  req: "slow",
+      hint: "高速で動く壁の巣。空中の余裕が物を言う",
+      cfg: { wHole: 0.14, wWall: 0.34, moverSpeed: 1.8, moverAmpl: 1.25, gapSolo: 1.25, gapMin: 0.6 } },
+    { id: "hall",  name: "白の回廊",     en: "White Hall", req: "white",
+      hint: "すべてが白。白になれなければ詰む",
+      cfg: { coloredBase: 0, coloredRate: 0, coloredMax: 0, whiteIslands: true,
+             wHole: 0.34, wWall: 0.72, gapSolo: 1.2, gapMin: 0.55 } },
+    { id: "depot", name: "資材倉庫",     en: "Depot",      req: "break",
+      hint: "跳び越せない白壁はフルチャージで粉砕",
+      cfg: { coloredBase: 0.05, coloredRate: 0.00002, coloredMax: 0.3,
+             wHole: 0.16, wWall: 0.80, tallWall: 0.45, gapSolo: 1.55, gapMin: 0.85 } },
+    { id: "gaunt", name: "ガントレット", en: "Gauntlet",   req: "revive",
+      hint: "高速・高密度の総合試験。命は2つある",
+      cfg: { gapSolo: 1.0, gapMin: 0.45, coloredBase: 0.2, coloredMax: 0.9,
+             pObsBoost: 0.15, speedBoost: 60 } }
+  ];
+
+  // ---------------------------------------------------------------------------
+  // 永続データ（星の貯金・所持スキル・ステージ別ベスト）
+  // ---------------------------------------------------------------------------
+  let starBank = parseInt(localStorage.getItem("cr_bank") || "0", 10) || 0;
+  let skills = {};   // { id: 1=所持&ON, 0=所持&OFF }
+  try { skills = JSON.parse(localStorage.getItem("cr_skills") || "{}") || {}; } catch (e) { skills = {}; }
+  let bests = {};
+  try { bests = JSON.parse(localStorage.getItem("cr_bests") || "{}") || {}; } catch (e) { bests = {}; }
+  if (!bests.gym) { // 旧バージョンのベストを体育館に引き継ぐ
+    const legacy = parseInt(localStorage.getItem("cr_best") || "0", 10) || 0;
+    if (legacy) bests.gym = legacy;
+  }
+  function hasSkill(id)  { return skills[id] !== undefined; }
+  function skillOn(id)   { return skills[id] === 1; }
+  function saveBank()    { localStorage.setItem("cr_bank", String(starBank)); }
+  function saveSkills()  { localStorage.setItem("cr_skills", JSON.stringify(skills)); }
+  function saveBests()   { localStorage.setItem("cr_bests", JSON.stringify(bests)); }
+  function stageUnlocked(st) { return !st.req || hasSkill(st.req); }
+
+  // ---------------------------------------------------------------------------
   // シード付き乱数 (mulberry32) — 再現可能なステージ生成のため
   // ---------------------------------------------------------------------------
   function mulberry32(a) {
@@ -130,7 +195,13 @@
   // ---------------------------------------------------------------------------
   // ゲーム状態
   // ---------------------------------------------------------------------------
-  let state;            // "title" | "play" | "dead"
+  let state;            // "title" | "skills" | "play" | "dead"
+  let stageSel = 0;     // タイトルで選択中のステージ番号
+  let stage = STAGES[0];// プレイ中のステージ
+  let bannedColor = null; // リバイブ後に封印された色
+  let reviveUsed = false; // このランでリバイブを使ったか
+  let invulnT = 0;        // リバイブ直後の無敵時間(秒)
+  let bankedThisRun = 0;  // リザルト表示用：このランで貯金された星数
   let rng;              // 生成用乱数
   let ghost;            // ステージ生成用の通過可能ゴースト
   let obstacles;
@@ -152,10 +223,21 @@
   const SHARE_URL = "https://kanai-maru.itch.io/geg";
   let toastMsg = "", toastUntil = 0; // 画面下の一時メッセージ
 
-  best = parseInt(localStorage.getItem("cr_best") || "0", 10) || 0;
+  best = bests[STAGES[0].id] || 0;
+
+  // ステージ設定の取得（未指定ならデフォルト値）
+  function scN(key, def) {
+    const v = stage.cfg ? stage.cfg[key] : undefined;
+    return v == null ? def : v;
+  }
+  // スキルを反映した実効パラメータ
+  function effChargeTime() { return skillOn("break") ? BREAK_CHARGE_TIME : CHARGE_TIME; }
+  function effGlideFrac()  { return skillOn("break") ? BREAK_GLIDE_FRAC : 1; }
+  function effHeightPen()  { return skillOn("high") ? HIGH_HEIGHT_PEN : HEIGHT_PEN; }
 
   function reset() {
     state = "title";
+    stage = STAGES[stageSel];
     initRun(0xC0FFEE); // 固定シード（タイトル背景用）
   }
 
@@ -170,7 +252,7 @@
     player = {
       x: 60, y: GROUND_Y, vy: 0, vx: BASE_VX,
       onGround: true, alive: true, nearGround: true,
-      ballColor: COL_ORANGE
+      ballColor: COL_ORANGE, breakJump: false
     };
     camX = player.x - CAM_ANCHOR / ZOOM;
     time = 0;
@@ -179,10 +261,16 @@
     charge = 0;
     paused = false;
     shakeT = 0;
+    bannedColor = null;
+    reviveUsed = false;
+    invulnT = 0;
+    bankedThisRun = 0;
     ensureGenerated(player.x + SEG_W * 2);
   }
 
   function startGame() {
+    stage = STAGES[stageSel];
+    best = bests[stage.id] || 0;
     initRun((Math.random() * 0xFFFFFFFF) >>> 0);
     state = "play";
   }
@@ -204,7 +292,7 @@
     while (ghost.x < segEnd) {
       // 放物線アーク（ランダムなチャージ）。障害物はアーク内のみ。着地後すぐ次のアーク。
       const c = rng() < 0.5 ? 0 : rng() * CHARGE_MAX;
-      const vy = BASE_VY * (1 - c * HEIGHT_PEN);
+      const vy = BASE_VY * (1 - c * effHeightPen()); // ゴーストもスキル込みの物理で跳ぶ
       const x0 = ghost.x;
       const vx = runSpeedAt(x0) + c * BOOST_MAX; // プレイヤーと同じ距離依存の速度で生成
       const T  = 2 * vy / G;
@@ -228,7 +316,8 @@
 
   // 壁・移動壁の色を選ぶ。序盤は白（すり抜け不可）が多く、進むほど色付きが増える。
   function pickWallColor(dist) {
-    const pColored = Math.min(COLORED_MAX, COLORED_BASE + dist * COLORED_RATE);
+    const pColored = Math.min(scN("coloredMax", COLORED_MAX),
+                              scN("coloredBase", COLORED_BASE) + dist * scN("coloredRate", COLORED_RATE));
     if (rng() < pColored) return rng() < 0.5 ? COL_ORANGE : COL_BLACK;
     return COL_WHITE;
   }
@@ -245,22 +334,24 @@
     // 序盤は1.4秒（着地→次を見て→必要ならチャージ、まで毎回間に合う＝1個ずつ対応）、
     // 2000m以降6000mへ向けて0.6秒まで短縮（前のジャンプ中に次を仕込む＝先読み要）。
     let gapT;
-    if (dist <= GAP_PHASE1_X) gapT = GAP_TIME_SOLO;
-    else if (dist >= GAP_PHASE2_X) gapT = GAP_TIME_MIN;
-    else gapT = GAP_TIME_SOLO + (GAP_TIME_MIN - GAP_TIME_SOLO) *
+    const gSolo = scN("gapSolo", GAP_TIME_SOLO), gMin = scN("gapMin", GAP_TIME_MIN);
+    if (dist <= GAP_PHASE1_X) gapT = gSolo;
+    else if (dist >= GAP_PHASE2_X) gapT = gMin;
+    else gapT = gSolo + (gMin - gSolo) *
                (dist - GAP_PHASE1_X) / (GAP_PHASE2_X - GAP_PHASE1_X);
     const spacing = runSpeedAt(x0) * gapT;
     if (x0 - lastObstacleX < spacing) return;
 
     // 距離が進むほど障害物の出現確率が上がる
-    const pObstacle = Math.min(0.9, 0.5 + dist * 0.00003);
+    const pObstacle = Math.min(0.95, 0.5 + scN("pObsBoost", 0) + dist * 0.00003);
     if (rng() > pObstacle) return;
 
     const arcW = landX - x0;
     const clearance = GROUND_Y - apexY;
     const t = rng();
+    const wHole = scN("wHole", 0.40), wWall = scN("wWall", 0.70);
 
-    if (t < 0.40 && arcW > (2 * margin + 70)) {
+    if (t < wHole && arcW > (2 * margin + 70)) {
       const hx1 = x0 + margin, hx2 = landX - margin;
       const hole = { type: "hole", x1: hx1, x2: hx2 };
       // 救済の浮島は「最大級の穴」だけに置く（中サイズの穴には付けない）。
@@ -269,28 +360,36 @@
         const cx = (hx1 + hx2) / 2;
         hole.island = {
           x1: cx - ISLAND_W / 2, x2: cx + ISLAND_W / 2,
-          color: rng() < 0.5 ? COL_ORANGE : COL_BLACK
+          color: scN("whiteIslands", false) ? COL_WHITE
+               : (rng() < 0.5 ? COL_ORANGE : COL_BLACK)
         };
       }
       obstacles.push(hole);
       lastObstacleX = landX;
-    } else if (t < 0.70) {
-      const h = Math.min(clearance - margin, MAX_WALL_H);
+    } else if (t < wWall) {
+      // 資材倉庫など：tallWall の確率で「跳び越え不能な白壁」（破壊専用）を置く
+      if (rng() < scN("tallWall", 0)) {
+        const h = clearance + 50 + rng() * 60;
+        obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: COL_WHITE, breakable: true });
+        lastObstacleX = apexX + 14;
+        return;
+      }
+      const h = Math.min(clearance - margin, scN("wallMaxH", MAX_WALL_H));
       if (h > MIN_WALL_H) {
         const color = pickWallColor(dist);
         obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: color });
         lastObstacleX = apexX + 14;
       }
     } else {
-      const ampl = Math.min(MAX_AMPL, 28 + dist * 0.004);
-      const gapH = 2 * (ampl + margin);
+      const ampl = Math.min(MAX_AMPL * scN("moverAmpl", 1), (28 + dist * 0.004) * scN("moverAmpl", 1));
+      const gapH = 2 * (ampl / scN("moverAmpl", 1) + margin); // 隙間は基準振幅ベースで確保
       const color = pickWallColor(dist);
       obstacles.push({
         type: "mover",
         x: apexX - 17, w: 34,
         center: apexY, ampl: ampl, gapH: gapH,
         phase: rng() * Math.PI * 2,
-        speed: 1.4 + rng() * 1.6,
+        speed: (1.4 + rng() * 1.6) * scN("moverSpeed", 1),
         color: color
       });
       lastObstacleX = apexX + 17;
@@ -337,13 +436,19 @@
   // ---------------------------------------------------------------------------
   function press() {
     ensureAudio(); // ユーザー操作のタイミングで音声を有効化
-    if (state === "title") { startGame(); return; }
+    if (state === "title") { if (stageUnlocked(STAGES[stageSel])) startGame(); return; }
+    if (state === "skills") return; // スキル画面はクリック/タップで操作
     if (state === "dead") { if (time - deadAt > 0.4) startGame(); return; }
     if (paused) return; // 一時停止中はゲーム操作を受け付けない
     if (!player.onGround && !player.nearGround) {
-      // 高い空中での押下：ボールの色を切り替える（壁すり抜け用）
-      player.ballColor = player.ballColor === COL_ORANGE ? COL_BLACK : COL_ORANGE;
-      playSwitch();
+      // 高い空中での押下：ボールの色を切り替える（封印色はスキップ、白はスキルON時のみ）
+      const arr = allowedColors();
+      const i = arr.indexOf(player.ballColor);
+      const next = arr[(i + 1) % arr.length];
+      if (next && next !== player.ballColor) {
+        player.ballColor = next;
+        playSwitch();
+      }
       return;
     }
     holding = true;
@@ -396,16 +501,92 @@
     }
   }
 
+  // --- メニューUIのレイアウト ---------------------------------------------
+  const CARD_W = 210, CARD_H = 88, CARD_GAP = 16;
+  const CARD_X0 = Math.round((W - (CARD_W * 3 + CARD_GAP * 2)) / 2);
+  const CARD_Y0 = 168;
+  function stageCardRect(i) {
+    return { x: CARD_X0 + (i % 3) * (CARD_W + CARD_GAP),
+             y: CARD_Y0 + Math.floor(i / 3) * (CARD_H + CARD_GAP),
+             w: CARD_W, h: CARD_H };
+  }
+  const SKILLS_BTN = { x: Math.round(W / 2 - 130), y: 392, w: 260, h: 44 };
+  const SKILL_ROW_W = 660, SKILL_ROW_H = 56, SKILL_ROW_GAP = 9, SKILL_Y0 = 120;
+  function skillRowRect(i) {
+    return { x: Math.round((W - SKILL_ROW_W) / 2),
+             y: SKILL_Y0 + i * (SKILL_ROW_H + SKILL_ROW_GAP),
+             w: SKILL_ROW_W, h: SKILL_ROW_H };
+  }
+  const BACK_BTN = { x: 20, y: 20, w: 110, h: 38 };
+  const MENU_BTN = { w: 200, h: 40, x: Math.round(W / 2 - 100), y: Math.round(H / 2 + 172) };
+  function inRect(pt, r) { return pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h; }
+
+  function clickSkillRow(i) {
+    const sk = SKILLS[i];
+    if (!hasSkill(sk.id)) {
+      if (starBank >= sk.cost) {
+        starBank -= sk.cost; saveBank();
+        skills[sk.id] = 1; saveSkills();
+        playCoin();
+        showToast(sk.name + " を獲得！ / " + sk.en + " unlocked!");
+      } else {
+        showToast("★が足りません（あと" + (sk.cost - starBank) + "） / Not enough stars");
+      }
+    } else {
+      skills[sk.id] = skillOn(sk.id) ? 0 : 1; saveSkills();
+      playSwitch();
+    }
+  }
+
   function pointerDown(e) {
     const pt = evToCanvas(e);
     if (state === "play" && inPauseBtn(pt.x, pt.y)) { togglePause(); return; }
-    if (state === "dead" && time - deadAt > 0.4 && inShareBtn(pt.x, pt.y)) { shareScore(); return; }
+    if (state === "title") {
+      ensureAudio();
+      if (inRect(pt, SKILLS_BTN)) { state = "skills"; return; }
+      for (let i = 0; i < STAGES.length; i++) {
+        if (inRect(pt, stageCardRect(i))) {
+          const st = STAGES[i];
+          if (!stageUnlocked(st)) {
+            const req = SKILLS.find(function (s) { return s.id === st.req; });
+            showToast("「" + (req ? req.name : "?") + "」の獲得で解放 / Unlock with " + (req ? req.en : "?"));
+          } else if (stageSel === i) {
+            startGame();           // 選択中のカードをもう一度タップでスタート
+          } else {
+            stageSel = i; playSwitch();
+          }
+          return;
+        }
+      }
+      return; // タイトルの何もない場所のタップでは始めない（誤操作防止）
+    }
+    if (state === "skills") {
+      ensureAudio();
+      if (inRect(pt, BACK_BTN)) { state = "title"; return; }
+      for (let i = 0; i < SKILLS.length; i++) {
+        if (inRect(pt, skillRowRect(i))) { clickSkillRow(i); return; }
+      }
+      return;
+    }
+    if (state === "dead" && time - deadAt > 0.4) {
+      if (inShareBtn(pt.x, pt.y)) { shareScore(); return; }
+      if (inRect(pt, MENU_BTN)) { reset(); return; }
+    }
     press();
   }
 
   window.addEventListener("keydown", function (e) {
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); if (!e.repeat) press(); }
+    else if (e.code === "Escape" && state === "skills") { e.preventDefault(); state = "title"; }
     else if (e.code === "KeyP" || e.code === "Escape") { e.preventDefault(); if (!e.repeat) togglePause(); }
+    else if (state === "title" && (e.code === "ArrowRight" || e.code === "ArrowLeft" ||
+                                   e.code === "ArrowUp" || e.code === "ArrowDown")) {
+      e.preventDefault();
+      const d = (e.code === "ArrowRight") ? 1 : (e.code === "ArrowLeft") ? -1 :
+                (e.code === "ArrowDown") ? 3 : -3;
+      stageSel = (stageSel + d + STAGES.length) % STAGES.length;
+    }
+    else if (state === "title" && e.code === "KeyS") { e.preventDefault(); state = "skills"; }
   });
   window.addEventListener("keyup", function (e) {
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); release(); }
@@ -420,17 +601,20 @@
   // ---------------------------------------------------------------------------
   function update(dt) {
     if (state === "play" && paused) return; // 一時停止中はフリーズ（時間も進めない）
+    // エアブレーキ：空中にいる間は世界全体の時間が遅く流れる（実時間の反応猶予が増える）
+    if (state === "play" && skillOn("slow") && player && !player.onGround) dt *= SLOW_SCALE;
     time += dt;
     if (state !== "play") return;
 
     const p = player;
+    if (invulnT > 0) invulnT -= dt;
 
     // チャージが有効なのは「接地中」か「着地に向けて降下中で地面に近い」ときだけ。
     // 高い空中ではボタンは無効（何も溜まらない）。
     p.nearGround = p.onGround || (p.vy >= 0 && (GROUND_Y - p.y) <= NEAR_GROUND_H);
     const canCharge = holding && p.nearGround;
     if (canCharge) {
-      charge = Math.min(CHARGE_MAX, charge + dt / CHARGE_TIME);
+      charge = Math.min(CHARGE_MAX, charge + dt / effChargeTime());
     }
 
     // チャージ音（溜まるほど音階が上がる）。チャージしていない間は止める。
@@ -441,8 +625,9 @@
       if (holding && charge < CHARGE_MAX) {
         // チャージ中は一定速度で前進。フルチャージ(CHARGE_TIME)でちょうど
         // 通常ジャンプ1回分の飛距離（= runSpeed × 滞空時間）だけ進むよう速度を設定。
-        const jumpDist = runSpeedAt(p.x) * (2 * BASE_VY / G);
-        p.vx = jumpDist / CHARGE_TIME;
+        // ブレイクチャージ時は時間も滑走距離も同率で短縮（体感の滑走速度は同じ）
+        const jumpDist = runSpeedAt(p.x) * (2 * BASE_VY / G) * effGlideFrac();
+        p.vx = jumpDist / effChargeTime();
         p.y = GROUND_Y; p.vy = 0;
       } else if (charge > 0) {
         // チャージ解放ジャンプ（離した瞬間 or 上限到達で自動解放）。
@@ -465,6 +650,7 @@
       if (landableAt(p.x)) {   // 通常の地面 or 色違いの浮島に着地
         if (!p.onGround) playLand(); // 着地音（空中→接地の瞬間だけ）
         p.y = GROUND_Y; p.vy = 0; p.onGround = true;
+        p.breakJump = false; // 破壊効果はそのジャンプ限り
       } else {
         p.onGround = false; // 穴の上（または同色の浮島）：落下継続
         if (p.y > DEATH_Y) return die();
@@ -507,15 +693,17 @@
 
   // 進行距離に応じた基本前進速度（等加速度的に緩やかに上昇、上限あり）
   function runSpeedAt(x) {
-    return BASE_VX + Math.min(SPEED_EXTRA_MAX, x * SPEED_ACCEL);
+    return BASE_VX + scN("speedBoost", 0) + Math.min(SPEED_EXTRA_MAX, x * SPEED_ACCEL);
   }
 
   function launch(c) {
     const p = player;
-    p.vy = -BASE_VY * (1 - c * HEIGHT_PEN);
+    p.vy = -BASE_VY * (1 - c * effHeightPen());
     // チャージ分はそのジャンプ限りの加速（慣性として蓄積しない）。基本速度は進行で緩やかに上昇。
     p.vx = runSpeedAt(p.x) + c * BOOST_MAX;
     p.onGround = false;
+    // ブレイクチャージ：フルチャージで放ったジャンプ中は白壁を破壊できる
+    p.breakJump = skillOn("break") && c >= 0.98;
     charge = 0;            // ジャンプしたらチャージはリセット（押しっぱなしでも）
     stopChargeTone();
     playJump(c);           // ジャンプ音（チャージが大きいほど高め）
@@ -527,6 +715,7 @@
 
   function checkCollisions() {
     const p = player;
+    if (invulnT > 0) return; // リバイブ直後の無敵
     const left = p.x - PLAYER_W / 2, right = p.x + PLAYER_W / 2;
     const top = p.y - PLAYER_H, bottom = p.y;
     for (let i = 0; i < obstacles.length; i++) {
@@ -534,25 +723,68 @@
       if (o.color && o.color === p.ballColor) continue; // 色が一致＝すり抜け
       if (o.type === "wall") {
         const wtop = GROUND_Y - o.h;
-        if (right > o.x && left < o.x + o.w && bottom > wtop) return die();
+        if (right > o.x && left < o.x + o.w && bottom > wtop) {
+          // ブレイクチャージ：フルチャージジャンプ中は白い固定壁を破壊して通過
+          if (p.breakJump && o.color === COL_WHITE) {
+            obstacles.splice(i, 1); i--;
+            shakeT = Math.max(shakeT, 0.18);
+            playBreak();
+            continue;
+          }
+          return die(o);
+        }
       } else if (o.type === "mover") {
         if (right > o.x && left < o.x + o.w) {
           const g = moverGap(o);
-          if (top < g.top || bottom > g.bottom) return die();
+          if (top < g.top || bottom > g.bottom) return die(o);
         }
       }
     }
   }
 
-  function die() {
+  // 今チェンジ可能な色の一覧（封印された色は除外。白はスキルON時のみ）
+  function allowedColors() {
+    const arr = [COL_ORANGE, COL_BLACK];
+    if (skillOn("white")) arr.push(COL_WHITE);
+    return arr.filter(function (c) { return c !== bannedColor; });
+  }
+
+  function die(killer) {
     if (!player.alive) return;
+    // リバイブ：1回だけ復活して続行。ミスした時点の色は以後このランで使用不可。
+    if (skillOn("revive") && !reviveUsed) {
+      reviveUsed = true;
+      bannedColor = player.ballColor;
+      const ok = allowedColors();
+      player.ballColor = ok[0] || COL_BLACK;
+      // ミスの原因の先へ再配置（穴なら向こう岸、壁なら壁の先）
+      let nx = player.x + 60;
+      if (killer) nx = (killer.type === "hole" ? killer.x2 : killer.x + killer.w) + 50;
+      ensureGenerated(nx + SEG_W * 2);
+      for (let k = 0; k < 200 && !landableAt(nx); k++) nx += 16; // 足場まで前進
+      player.x = nx; player.y = GROUND_Y; player.vy = 0;
+      player.onGround = true; player.breakJump = false;
+      charge = 0; holding = false;
+      invulnT = 1.2;
+      shakeT = 0.25;
+      stopChargeTone();
+      playRevive();
+      showToast("リバイブ！ " + (bannedColor === COL_ORANGE ? "オレンジ" : bannedColor === COL_BLACK ? "黒" : "白") + "は封印 / Revived!");
+      return;
+    }
     player.alive = false;
     state = "dead";
     deadAt = time;
     shakeT = 0.4;
     stopChargeTone();
     playDeath();
-    if (score > best) { best = score; localStorage.setItem("cr_best", String(best)); }
+    // 集めた星を貯金へ
+    bankedThisRun = starsCollected;
+    starBank += starsCollected;
+    saveBank();
+    if (score > (bests[stage.id] || 0)) {
+      bests[stage.id] = score; best = score; saveBests();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -656,6 +888,42 @@
     });
   }
 
+  function playBreak() {
+    if (!actx) return;
+    // 白壁粉砕：ノイズ風の短い破裂音
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "sawtooth";
+    o.frequency.setValueAtTime(160, actx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(40, actx.currentTime + 0.18);
+    g.gain.setValueAtTime(0.22, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.2);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.22);
+    const o2 = actx.createOscillator(), g2 = actx.createGain();
+    o2.type = "square";
+    o2.frequency.setValueAtTime(880, actx.currentTime);
+    o2.frequency.exponentialRampToValueAtTime(220, actx.currentTime + 0.08);
+    g2.gain.setValueAtTime(0.10, actx.currentTime);
+    g2.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
+    o2.connect(g2).connect(actx.destination);
+    o2.start(); o2.stop(actx.currentTime + 0.12);
+  }
+  function playRevive() {
+    if (!actx) return;
+    // 復活：上昇する3音
+    const t0 = actx.currentTime;
+    [392, 523, 784].forEach(function (f, i) {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(f, t0 + i * 0.09);
+      g.gain.setValueAtTime(0.0001, t0 + i * 0.09);
+      g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.09 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.09 + 0.22);
+      o.connect(g).connect(actx.destination);
+      o.start(t0 + i * 0.09); o.stop(t0 + i * 0.09 + 0.25);
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // 描画
   // ---------------------------------------------------------------------------
@@ -689,8 +957,9 @@
     ctx.restore();
 
     drawHUD();
-    if (state === "title") drawTitle();
-    if (state === "dead")  drawDead();
+    if (state === "title")  drawTitle();
+    if (state === "skills") drawSkills();
+    if (state === "dead")   drawDead();
     if (state === "play" && paused) drawPause();
 
     // 一時メッセージ（共有時のフィードバックなど）
@@ -876,11 +1145,22 @@
   function drawPlayer() {
     const p = player;
 
+    // リバイブ直後は点滅（無敵の合図）
+    if (invulnT > 0 && (time * 10) % 2 < 1) return;
+
     // 接地影
     ctx.fillStyle = "rgba(0,0,0,0.25)";
     ctx.beginPath();
     ctx.ellipse(p.x, GROUND_Y + 2, BALL_R * 0.9, 5, 0, 0, Math.PI * 2);
     ctx.fill();
+
+    // ブレイクチャージ中（白壁破壊可能）は赤いオーラ
+    if (p.breakJump) {
+      ctx.fillStyle = "rgba(255,90,60," + (0.35 + 0.2 * Math.sin(time * 14)) + ")";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y - BALL_R, BALL_R * 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // チャージのグロー
     if (charge > 0) {
@@ -952,6 +1232,26 @@
     ctx.font = "bold 16px sans-serif";
     ctx.fillText("★ " + starsCollected, 22, 84);
 
+    if (state === "play" || state === "dead") {
+      // ステージ名
+      ctx.fillStyle = "#7a6033";
+      ctx.font = "13px sans-serif";
+      ctx.fillText(stage.name + " / " + stage.en, 22, 104);
+      // リバイブ残機
+      if (skillOn("revive")) {
+        ctx.font = "bold 15px sans-serif";
+        ctx.fillStyle = reviveUsed ? "rgba(120,90,40,0.35)" : "#d04a3a";
+        ctx.fillText(reviveUsed ? "♡" : "♥ REVIVE", 22, 126);
+      }
+      // 封印された色
+      if (bannedColor) {
+        ctx.fillStyle = "#8a2f1f";
+        ctx.font = "bold 13px sans-serif";
+        ctx.fillText("封印: " + (bannedColor === COL_ORANGE ? "オレンジ" : bannedColor === COL_BLACK ? "黒" : "白") +
+                     " / Sealed", 22, 146);
+      }
+    }
+
     if (state === "play") {
       drawPauseButton();
 
@@ -1007,31 +1307,132 @@
     overlay();
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
-    ctx.font = "bold 48px sans-serif";
-    ctx.fillText("Bound", W / 2, 150);
+    ctx.font = "bold 44px sans-serif";
+    ctx.fillText("Bound", W / 2, 72);
+    ctx.fillStyle = "#a7adda";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("地上で長押しチャージ／空中タップで色チェンジ・同色すり抜け", W / 2, 100);
+    ctx.fillText("Hold to charge on ground / Tap mid-air to switch color & phase", W / 2, 118);
 
-    // 各項目を 日本語 / 英語 の2行に分けて表示（横はみ出し防止）
-    const items = [
-      ["地上で長押しチャージ → 離してバウンド", "Hold on the ground to charge, release to bounce"],
-      ["空中タップでカラーチェンジ", "Tap in mid-air to switch color"],
-      ["同じ色はすり抜け、違う色はぶつかる", "Same color passes through, different color blocks"],
-    ];
-    const yBase = 214;
-    items.forEach(function (it, i) {
-      const y = yBase + i * 50;
-      ctx.fillStyle = "#dfe4ff";
-      ctx.font = "16px sans-serif";
-      ctx.fillText(it[0], W / 2, y);
-      ctx.fillStyle = "#a7adda";
-      ctx.font = "13px sans-serif";
-      ctx.fillText(it[1], W / 2, y + 19);
-    });
+    // 星の貯金（右上）
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#ffd23a";
+    ctx.font = "bold 22px sans-serif";
+    ctx.fillText("★ " + starBank, W - 24, 44);
+
+    // ステージカード（3×2）
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#dfe4ff";
+    ctx.font = "bold 16px sans-serif";
+    ctx.fillText("STAGE SELECT", W / 2, CARD_Y0 - 14);
+    for (let i = 0; i < STAGES.length; i++) {
+      const st = STAGES[i], r = stageCardRect(i);
+      const unlocked = stageUnlocked(st);
+      const sel = (i === stageSel);
+      ctx.fillStyle = unlocked ? (sel ? "rgba(90,180,255,0.30)" : "rgba(255,255,255,0.10)")
+                               : "rgba(255,255,255,0.04)";
+      roundRect(r.x, r.y, r.w, r.h, 10); ctx.fill();
+      if (sel) {
+        ctx.strokeStyle = ((time * 2.5) % 2 < 1) ? "#78dcff" : "#5ad6c0";
+        ctx.lineWidth = 3;
+        roundRect(r.x, r.y, r.w, r.h, 10); ctx.stroke();
+      }
+      const cx = r.x + r.w / 2;
+      if (unlocked) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 18px sans-serif";
+        ctx.fillText(st.name, cx, r.y + 28);
+        ctx.fillStyle = "#a7adda";
+        ctx.font = "12px sans-serif";
+        ctx.fillText(st.en + "  /  BEST " + (bests[st.id] || 0) + " m", cx, r.y + 48);
+        ctx.fillStyle = "#8d94c4";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(st.hint, cx, r.y + 70);
+      } else {
+        const req = SKILLS.find(function (s) { return s.id === st.req; });
+        ctx.fillStyle = "#7a7f9f";
+        ctx.font = "bold 18px sans-serif";
+        ctx.fillText("🔒 " + st.name, cx, r.y + 32);
+        ctx.fillStyle = "#666b8a";
+        ctx.font = "12px sans-serif";
+        ctx.fillText("要スキル：" + (req ? req.name : "?"), cx, r.y + 54);
+        ctx.fillText("Needs: " + (req ? req.en : "?"), cx, r.y + 70);
+      }
+    }
+
+    // スキルショップボタン
+    const sb = SKILLS_BTN;
+    ctx.fillStyle = "rgba(255,210,58,0.18)";
+    roundRect(sb.x, sb.y, sb.w, sb.h, 10); ctx.fill();
+    ctx.strokeStyle = "#ffd23a"; ctx.lineWidth = 2;
+    roundRect(sb.x, sb.y, sb.w, sb.h, 10); ctx.stroke();
+    ctx.fillStyle = "#ffe79a";
+    ctx.font = "bold 17px sans-serif";
+    ctx.fillText("★ スキル / Skills (S)", W / 2, sb.y + 28);
 
     ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
-    ctx.font = "bold 24px sans-serif";
-    ctx.fillText("▶ スペース / タップ でスタート", W / 2, 396);
-    ctx.font = "14px sans-serif";
-    ctx.fillText("Space / Tap to start", W / 2, 418);
+    ctx.font = "bold 19px sans-serif";
+    ctx.fillText("▶ スペース or 選択カードをタップでスタート / Space or tap card to start", W / 2, 472);
+    ctx.fillStyle = "#8d94c4";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("←→↑↓ でステージ選択 / Arrow keys to select", W / 2, 494);
+    ctx.textAlign = "left";
+  }
+
+  // スキルショップ画面
+  function drawSkills() {
+    overlay();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.fillText("SKILLS", W / 2, 56);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#ffd23a";
+    ctx.font = "bold 22px sans-serif";
+    ctx.fillText("★ " + starBank, W - 24, 44);
+
+    // 戻るボタン
+    const bb = BACK_BTN;
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    roundRect(bb.x, bb.y, bb.w, bb.h, 9); ctx.fill();
+    ctx.fillStyle = "#dfe4ff";
+    ctx.font = "bold 15px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("← 戻る/Back", bb.x + bb.w / 2, bb.y + 25);
+
+    ctx.fillStyle = "#a7adda";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("タップで購入。所持スキルはタップで ON / OFF　|　Tap to buy; tap owned skills to toggle", W / 2, 96);
+
+    for (let i = 0; i < SKILLS.length; i++) {
+      const sk = SKILLS[i], r = skillRowRect(i);
+      const own = hasSkill(sk.id), on = skillOn(sk.id);
+      const afford = starBank >= sk.cost;
+      ctx.fillStyle = own ? (on ? "rgba(90,214,192,0.22)" : "rgba(255,255,255,0.07)")
+                          : (afford ? "rgba(255,210,58,0.13)" : "rgba(255,255,255,0.045)");
+      roundRect(r.x, r.y, r.w, r.h, 10); ctx.fill();
+      if (own && on) {
+        ctx.strokeStyle = "#5ad6c0"; ctx.lineWidth = 2;
+        roundRect(r.x, r.y, r.w, r.h, 10); ctx.stroke();
+      }
+      ctx.textAlign = "left";
+      ctx.fillStyle = own ? "#fff" : (afford ? "#ffe79a" : "#8d94c4");
+      ctx.font = "bold 17px sans-serif";
+      ctx.fillText(sk.name + "  /  " + sk.en, r.x + 16, r.y + 24);
+      ctx.fillStyle = own ? "#a9d8cf" : "#8d94c4";
+      ctx.font = "12px sans-serif";
+      ctx.fillText(sk.desc + "  |  " + sk.en2, r.x + 16, r.y + 44);
+      ctx.textAlign = "right";
+      if (own) {
+        ctx.fillStyle = on ? "#5ad6c0" : "#7a7f9f";
+        ctx.font = "bold 16px sans-serif";
+        ctx.fillText(on ? "ON" : "OFF", r.x + r.w - 18, r.y + 35);
+      } else {
+        ctx.fillStyle = afford ? "#ffd23a" : "#7a7f9f";
+        ctx.font = "bold 16px sans-serif";
+        ctx.fillText("★ " + sk.cost, r.x + r.w - 18, r.y + 35);
+      }
+    }
     ctx.textAlign = "left";
   }
 
@@ -1047,13 +1448,13 @@
     ctx.fillStyle = "#c8cdf0";
     ctx.font = "18px sans-serif";
     ctx.fillText("BEST " + best + " m", W / 2, H / 2 + 44);
-    ctx.fillStyle = "#111111";
+    ctx.fillStyle = "#ffd23a";
     ctx.font = "bold 20px sans-serif";
-    ctx.fillText("★ " + starsCollected, W / 2, H / 2 + 72);
+    ctx.fillText("★ +" + bankedThisRun + "  （貯金 " + starBank + "） / Bank " + starBank, W / 2, H / 2 + 72);
     if (time - deadAt > 0.4) {
       ctx.fillStyle = ((time * 2) % 2 < 1) ? "#78dcff" : "#5ad6c0";
-      ctx.font = "bold 22px sans-serif";
-      ctx.fillText("▶ スペース / タップ でリトライ  |  Space / Tap to retry", W / 2, H / 2 + 90);
+      ctx.font = "bold 20px sans-serif";
+      ctx.fillText("▶ スペース / タップ でリトライ  |  Space / Tap to retry", W / 2, H / 2 + 98);
 
       // SNS シェアボタン
       const b = SHARE_BTN;
@@ -1063,6 +1464,13 @@
       roundRect(b.x, b.y, b.w, b.h, 12); ctx.stroke();
       ctx.fillStyle = "#e6f6ff"; ctx.font = "bold 18px sans-serif";
       ctx.fillText("結果をシェア / Share", W / 2, b.y + 29);
+
+      // メニューへ戻る
+      const m = MENU_BTN;
+      ctx.fillStyle = "rgba(255,255,255,0.12)";
+      roundRect(m.x, m.y, m.w, m.h, 10); ctx.fill();
+      ctx.fillStyle = "#dfe4ff"; ctx.font = "bold 16px sans-serif";
+      ctx.fillText("メニュー / Menu", W / 2, m.y + 26);
     }
     ctx.textAlign = "left";
   }
