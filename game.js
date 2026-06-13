@@ -122,7 +122,15 @@
   function saveBank()    { localStorage.setItem("cr_bank", String(starBank)); }
   function saveSkills()  { localStorage.setItem("cr_skills", JSON.stringify(skills)); }
   function saveBests()   { localStorage.setItem("cr_bests", JSON.stringify(bests)); }
-  function stageUnlocked(st) { return !st.req || hasSkill(st.req); }
+  // 解放条件のスキルID一覧（req は文字列 or 配列 or null）。すべて所持で解放。
+  function reqIds(st) { const r = st.req; return !r ? [] : (Array.isArray(r) ? r : [r]); }
+  function stageUnlocked(st) { return reqIds(st).every(hasSkill); }
+  function reqNames(st, key) { // key: "name"(JP) | "en"
+    return reqIds(st).map(function (id) {
+      const s = SKILLS.find(function (sk) { return sk.id === id; });
+      return s ? s[key] : "?";
+    }).join("・");
+  }
 
   // ---------------------------------------------------------------------------
   // 自作ステージ（editor.html が localStorage "cr_custom_stages" に保存）を読み込む。
@@ -136,7 +144,8 @@
       const m = s.meta || {};
       STAGES.push({
         id: "custom:" + (m.name || "?"), name: m.name || "自作", en: m.en || "Custom",
-        req: m.req || null, hint: m.hint || "自作ステージ / Custom", cfg: {},
+        req: Array.isArray(m.req) ? m.req : (m.req || null),
+        hint: m.hint || "自作ステージ / Custom", cfg: {},
         custom: true, phys: s.phys || {}, length: s.length || 6000,
         obstacles: s.obstacles || [], items: s.items || []
       });
@@ -593,8 +602,7 @@
         if (inRect(pt, stageCardRect(i))) {
           const st = STAGES[i];
           if (!stageUnlocked(st)) {
-            const req = SKILLS.find(function (s) { return s.id === st.req; });
-            showToast("「" + (req ? req.name : "?") + "」の獲得で解放 / Unlock with " + (req ? req.en : "?"));
+            showToast("「" + reqNames(st, "name") + "」の獲得で解放 / Unlock with " + reqNames(st, "en"));
           } else if (stageSel === i) {
             maybeStartGame();      // 選択中のカードをもう一度タップでスタート
           } else {
@@ -774,8 +782,8 @@
       const o = obstacles[i];
       if (o.color && o.color === p.ballColor) continue; // 色が一致＝すり抜け
       if (o.type === "wall") {
-        const wtop = GROUND_Y - o.h;
-        if (right > o.x && left < o.x + o.w && bottom > wtop) {
+        const wtop = Bound.wallTop(o), wbot = Bound.wallBottom(o);
+        if (right > o.x && left < o.x + o.w && bottom > wtop && top < wbot) {
           // ブレイクチャージ：フルチャージジャンプ中は白い固定壁を破壊して通過
           if (p.breakJump && o.color === COL_WHITE) {
             obstacles.splice(i, 1); i--;
@@ -1267,14 +1275,13 @@
         ctx.font = "11px sans-serif";
         ctx.fillText(st.hint, cx, r.y + 70);
       } else {
-        const req = SKILLS.find(function (s) { return s.id === st.req; });
         ctx.fillStyle = "#7a7f9f";
         ctx.font = "bold 18px sans-serif";
         ctx.fillText("🔒 " + st.name, cx, r.y + 32);
         ctx.fillStyle = "#666b8a";
         ctx.font = "12px sans-serif";
-        ctx.fillText("要スキル：" + (req ? req.name : "?"), cx, r.y + 54);
-        ctx.fillText("Needs: " + (req ? req.en : "?"), cx, r.y + 70);
+        ctx.fillText("要スキル：" + reqNames(st, "name"), cx, r.y + 54);
+        ctx.fillText("Needs: " + reqNames(st, "en"), cx, r.y + 70);
       }
     }
 

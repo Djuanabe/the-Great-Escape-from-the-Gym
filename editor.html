@@ -53,15 +53,14 @@
         <div class="row"><label>名前 (JP)</label><input id="m_name" type="text" value="新ステージ"></div>
         <div class="row"><label>名前 (EN)</label><input id="m_en" type="text" value="New Stage"></div>
         <div class="row"><label>説明</label><input id="m_hint" type="text" value=""></div>
-        <div class="row"><label>解放スキル</label>
-          <select id="m_req">
-            <option value="">なし（最初から解放）</option>
-            <option value="high">ハイアーチ</option>
-            <option value="slow">エアブレーキ</option>
-            <option value="white">ホワイトチェンジ</option>
-            <option value="revive">リバイブ</option>
-            <option value="break">ブレイクチャージ</option>
-          </select>
+        <div class="row" style="align-items:flex-start;"><label>解放スキル<br><span style="font-weight:400;color:#999;">(全て必要)</span></label>
+          <div id="m_req" class="reqlist">
+            <label><input type="checkbox" value="high"> ハイアーチ</label>
+            <label><input type="checkbox" value="slow"> エアブレーキ</label>
+            <label><input type="checkbox" value="white"> ホワイトチェンジ</label>
+            <label><input type="checkbox" value="revive"> リバイブ</label>
+            <label><input type="checkbox" value="break"> ブレイクチャージ</label>
+          </div>
         </div>
         <div class="row"><label>全長</label>
           <input id="m_length" type="number" value="6000" step="100"><span class="unit">px</span></div>

@@ -28,7 +28,7 @@
   let stage = newStage();
   function newStage() {
     return {
-      meta: { name: "新ステージ", en: "New Stage", hint: "", req: "" },
+      meta: { name: "新ステージ", en: "New Stage", hint: "", req: [] }, // req: 解放に必要なスキルID配列（全て必要）
       phys: Object.assign({}, PHYS_DEFAULT),
       length: 6000,
       obstacles: [],
@@ -55,17 +55,25 @@
   let selected = null;     // 選択中のオブジェクト参照
   let dragging = null;     // {obj, type, offX, offY} ドラッグ中
   let panning = null;      // {startSX, startCam}
-  let mode = "edit";       // "edit" | "play"
+  let mode = "edit";       // "edit" | "play" | "dead"（試遊中にミス＝一時停止）
   let edTime = 0;          // 編集プレビュー用の時間（移動壁アニメ）
+  let trajectory = [];     // 試遊中のボール軌道（{x,y}）。死亡/停止時に表示
+  let lastTrajectory = []; // 直前の試遊の軌道（編集に戻っても残す）
 
   // =========================================================================
   // ジオメトリ・ヒットテスト
   // =========================================================================
   function obstBounds(o) {
     if (o.type === "hole") return { x: o.x1, y: GROUND_Y, w: o.x2 - o.x1, h: 70 };
-    if (o.type === "wall") return { x: o.x, y: GROUND_Y - o.h, w: o.w, h: o.h };
+    if (o.type === "wall") return { x: o.x, y: Bound.wallTop(o), w: o.w, h: o.h };
     if (o.type === "mover") return { x: o.x, y: 0, w: o.w, h: GROUND_Y };
     return null;
+  }
+  // 壁を上下に動かす（空中化）。地面に着いたら接地（o.y削除）に戻す。
+  function wallLift(o, dy) {
+    const top = (o.y != null ? o.y : GROUND_Y - o.h) + dy;
+    if (top + o.h >= GROUND_Y) delete o.y;        // 接地
+    else o.y = Math.max(-60, Math.round(top));    // 空中
   }
   function hitObstacle(wx, wy) {
     // 後ろ（新しいもの）から優先
@@ -102,6 +110,8 @@
       stage.obstacles.push(obj);
     } else if (tool === "wall") {
       obj = { type: "wall", x: Math.round(wx - 14), w: 28, h: 110, color: COL_WHITE };
+      // 地面から十分上でクリックしたら「空中の壁」にする（接地壁は y を持たない）
+      if (wy < GROUND_Y - 130) { obj.h = 90; obj.y = Math.round(wy - 45); }
       stage.obstacles.push(obj);
     } else if (tool === "mover") {
       const cy = Math.max(120, Math.min(GROUND_Y - 40, Math.round(wy)));
@@ -135,7 +145,8 @@
     if (!selected) return;
     const o = selected;
     if (o.type === "hole") { o.x1 += dx; o.x2 += dx; if (o.island) { o.island.x1 += dx; o.island.x2 += dx; } }
-    else if (o.type === "wall" || o.type === "mover") { o.x += dx; if (o.type === "mover") o.center += dy; }
+    else if (o.type === "wall") { o.x += dx; if (dy) wallLift(o, dy); }
+    else if (o.type === "mover") { o.x += dx; o.center += dy; }
     else { o.x += dx; o.y += dy; } // star
     buildInspector();
   }
@@ -151,6 +162,15 @@
     inp.type = "number"; inp.value = Math.round(value * 1000) / 1000; inp.step = step;
     inp.addEventListener("input", function () { onInput(parseFloat(inp.value) || 0); });
     row.appendChild(lab); row.appendChild(inp); inspBody.appendChild(row);
+  }
+  function checkboxRow(label, checked, note, onChange) {
+    const row = document.createElement("div"); row.className = "row";
+    const lab = document.createElement("label"); lab.textContent = label;
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = checked;
+    cb.style.cssText = "flex:0 0 auto;width:18px;height:18px;";
+    cb.addEventListener("change", function () { onChange(cb.checked); });
+    const sp = document.createElement("span"); sp.className = "hint"; sp.textContent = note || "";
+    row.appendChild(lab); row.appendChild(cb); row.appendChild(sp); inspBody.appendChild(row);
   }
   function colorPicker(current, onPick) {
     const row = document.createElement("div"); row.className = "row";
@@ -193,14 +213,15 @@
       field("幅 w", o.w, 1, v => { o.w = Math.max(4, v); });
       field("高さ h", o.h, 5, v => { o.h = Math.max(8, v); });
       colorPicker(o.color, c => { o.color = c; buildInspector(); });
+      // 空中（浮かせる）：チェックで o.y を持たせる。解除で接地に戻す。
+      checkboxRow("空中に浮かせる", o.y != null, "地面から離して配置", function (on) {
+        if (on) { if (o.y == null) o.y = Math.max(-60, GROUND_Y - o.h - 80); }
+        else { delete o.y; }
+        buildInspector();
+      });
+      if (o.y != null) field("上端 y", o.y, 5, v => { o.y = v; });
       // breakable（ブレイクチャージ専用の壊せる白壁）
-      const row = document.createElement("div"); row.className = "row";
-      const lab = document.createElement("label"); lab.textContent = "破壊可能";
-      const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!o.breakable;
-      cb.style.cssText = "flex:0 0 auto;width:18px;height:18px;";
-      cb.addEventListener("change", function () { o.breakable = cb.checked; });
-      const note = document.createElement("span"); note.className = "hint"; note.textContent = "白壁をフルチャージで破壊";
-      row.appendChild(lab); row.appendChild(cb); row.appendChild(note); inspBody.appendChild(row);
+      checkboxRow("破壊可能", !!o.breakable, "白壁をフルチャージで破壊", function (on) { o.breakable = on; });
     } else if (o.type === "mover") {
       head.textContent = "移動壁"; inspBody.appendChild(head);
       field("x（左端）", o.x, 5, v => { o.x = v; });
@@ -240,7 +261,9 @@
     drawGround();
     drawObstacles();
     drawItems();
-    if (mode === "play") drawPlayer();
+    if (mode === "dead") drawTrajectory(lastTrajectory, 0.9);
+    else if (mode === "edit" && lastTrajectory.length > 1) drawTrajectory(lastTrajectory, 0.32);
+    if (mode === "play" || mode === "dead") drawPlayer();
     if (mode === "edit") drawSelection();
     drawGoal();
 
@@ -248,6 +271,27 @@
 
     if (mode === "edit") drawGrid();
     drawOverlay();
+  }
+
+  // 直前の試遊のボール軌道（破線）と、死亡地点の×印。ワールド座標で描画。
+  function drawTrajectory(pts, alpha) {
+    if (!pts || pts.length < 2) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = "#1a73c0"; ctx.lineWidth = 2 / zoom;
+    ctx.setLineDash([8 / zoom, 6 / zoom]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y - BALL_R);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y - BALL_R);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const last = pts[pts.length - 1], s = 9 / zoom;
+    ctx.strokeStyle = "#c0271a"; ctx.lineWidth = 3 / zoom;
+    ctx.beginPath();
+    ctx.moveTo(last.x - s, last.y - BALL_R - s); ctx.lineTo(last.x + s, last.y - BALL_R + s);
+    ctx.moveTo(last.x + s, last.y - BALL_R - s); ctx.lineTo(last.x - s, last.y - BALL_R + s);
+    ctx.stroke();
+    ctx.restore();
   }
 
   // 地面・スターは共有エンジンに委譲。障害物は共有描画＋編集アフォーダンス重ね描き。
@@ -260,7 +304,7 @@
     // 編集アフォーダンス（破壊壁マーク／移動壁の可動範囲）を重ねる
     for (const o of stage.obstacles) {
       if (o.type === "wall" && o.breakable) {
-        const wtop = GROUND_Y - o.h;
+        const wtop = Bound.wallTop(o);
         ctx.strokeStyle = "#c0271a"; ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(o.x + 4, wtop + 8); ctx.lineTo(o.x + o.w - 4, wtop + o.h * 0.5);
@@ -309,20 +353,34 @@
     ctx.restore();
   }
   function drawOverlay() {
-    if (mode === "play") {
+    if (mode === "play" || mode === "dead") {
+      // 右上のHUD
       ctx.fillStyle = "rgba(20,30,50,0.78)";
       roundRect(W - 250, 12, 238, 56, 8); ctx.fill();
       ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "left";
-      ctx.fillText("テストプレイ中  /  Esc で編集へ", W - 238, 34);
+      ctx.fillText(mode === "dead" ? "停止中  /  Esc で編集へ" : "テストプレイ中  /  Esc で編集へ", W - 238, 34);
       ctx.fillStyle = "#9fd8ff"; ctx.font = "12px sans-serif";
       ctx.fillText("距離 " + Math.floor(player.x / 10) + "m  ★" + collected + "  死亡 " + deaths, W - 238, 54);
-      if (cleared) {
-        ctx.fillStyle = "rgba(10,12,28,0.6)"; ctx.fillRect(0, 0, W, H);
-        ctx.fillStyle = "#5ad6c0"; ctx.font = "bold 48px sans-serif"; ctx.textAlign = "center";
-        ctx.fillText("STAGE CLEAR", W / 2, H / 2);
-        ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
-        ctx.fillText("Esc で編集へ戻る", W / 2, H / 2 + 36);
-      }
+      ctx.textAlign = "left";
+    }
+    if (mode === "dead") {
+      ctx.fillStyle = "rgba(10,12,28,0.5)"; ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff7080"; ctx.font = "bold 44px sans-serif";
+      ctx.fillText("GAME OVER", W / 2, H / 2 - 22);
+      ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif";
+      ctx.fillText("直前の軌道を表示中。クリック / Space で再挑戦、Esc で編集へ", W / 2, H / 2 + 14);
+      ctx.fillStyle = "#9fd8ff"; ctx.font = "12px sans-serif";
+      ctx.fillText("Trajectory shown — Click / Space to retry, Esc to edit", W / 2, H / 2 + 36);
+      ctx.textAlign = "left";
+    }
+    if (mode === "play" && cleared) {
+      ctx.fillStyle = "rgba(10,12,28,0.6)"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#5ad6c0"; ctx.font = "bold 48px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("STAGE CLEAR", W / 2, H / 2);
+      ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+      ctx.fillText("Esc で編集へ戻る", W / 2, H / 2 + 36);
+      ctx.textAlign = "left";
     }
   }
   function roundRect(x, y, w, h, r) { Bound.roundRect(ctx, x, y, w, h, r); }
@@ -341,14 +399,22 @@
                onGround: true, nearGround: true, ballColor: COL_ORANGE, breakJump: false };
     charge = 0; holding = false; collected = 0; deaths = 0; cleared = false;
     cam = player.x - CAM_ANCHOR / zoom;
+    trajectory = [{ x: player.x, y: player.y }];
     // テスト用に障害物/アイテムをディープコピー（破壊しても元データを汚さない）
     playObstacles = JSON.parse(JSON.stringify(stage.obstacles));
     playItems = JSON.parse(JSON.stringify(stage.items));
     document.getElementById("btnPlay").textContent = "■ 停止 (Esc)";
   }
   function stopPlay() {
+    if (trajectory.length > 1) lastTrajectory = trajectory.slice(); // 編集に戻っても軌道を残す
     mode = "edit";
     document.getElementById("btnPlay").textContent = "▶ テストプレイ";
+  }
+  // 試遊中のミス：即リセットせず一時停止し、直前の軌道を表示する
+  function gameOver() {
+    deaths++;
+    lastTrajectory = trajectory.slice();
+    mode = "dead";
   }
   let playObstacles = [], playItems = [];
 
@@ -362,11 +428,6 @@
     p.onGround = false;
     p.breakJump = c >= 0.98;
     charge = 0;
-  }
-  function respawn() {
-    deaths++;
-    player.x = 60; player.y = GROUND_Y; player.vy = 0; player.onGround = true;
-    player.ballColor = COL_ORANGE; player.breakJump = false; charge = 0; holding = false;
   }
   function updatePlay(dt) {
     const p = player;
@@ -383,9 +444,10 @@
       p.vy += P().G * dt;
     }
     p.x += p.vx * dt; p.y += p.vy * dt;
+    trajectory.push({ x: p.x, y: p.y }); // 軌道を記録（死亡地点まで）
     if (p.y >= GROUND_Y) {
       if (Bound.landableAt(playObstacles, p.x, player.ballColor)) { p.y = GROUND_Y; p.vy = 0; p.onGround = true; p.breakJump = false; }
-      else { p.onGround = false; if (p.y > DEATH_Y) return respawn(); }
+      else { p.onGround = false; if (p.y > DEATH_Y) return gameOver(); }
     }
     // 衝突
     const left = p.x - PLAYER_W / 2, right = p.x + PLAYER_W / 2, top = p.y - PLAYER_H, bottom = p.y;
@@ -393,15 +455,15 @@
       const o = playObstacles[i];
       if (o.color && o.color === p.ballColor) continue;
       if (o.type === "wall") {
-        const wtop = GROUND_Y - o.h;
-        if (right > o.x && left < o.x + o.w && bottom > wtop) {
+        const wtop = Bound.wallTop(o), wbot = Bound.wallBottom(o);
+        if (right > o.x && left < o.x + o.w && bottom > wtop && top < wbot) {
           if (p.breakJump && o.color === COL_WHITE) { playObstacles.splice(i, 1); i--; continue; }
-          return respawn();
+          return gameOver();
         }
       } else if (o.type === "mover") {
         if (right > o.x && left < o.x + o.w) {
           const g = Bound.moverGap(o, edTime);
-          if (top < g.top || bottom > g.bottom) return respawn();
+          if (top < g.top || bottom > g.bottom) return gameOver();
         }
       }
     }
@@ -428,6 +490,7 @@
   }
   cv.addEventListener("mousedown", function (e) {
     const pt = evToCanvas(e), w = screenToWorld(pt.x, pt.y);
+    if (mode === "dead") { startPlay(); return; }   // 停止中はクリックで再挑戦
     if (mode === "play") { holding = true; airTapColor(); return; }
     if (tool === "select") {
       const o = hitObstacle(w.x, w.y) || hitStar(w.x, w.y);
@@ -448,7 +511,7 @@
     }
   });
   window.addEventListener("mousemove", function (e) {
-    if (mode === "play") return;
+    if (mode !== "edit") return;
     if (panning) {
       const pt = evToCanvas(e);
       cam = panning.startCam - (pt.x - panning.startSX) / zoom;
@@ -467,7 +530,7 @@
     dragging = null; panning = null;
   });
   cv.addEventListener("wheel", function (e) {
-    if (mode === "play") return;
+    if (mode !== "edit") return;
     e.preventDefault();
     cam += (e.deltaY + e.deltaX) / zoom;
     clampCam(); syncScroll();
@@ -475,7 +538,7 @@
 
   function moveObj(o, dx, dy) {
     if (o.type === "hole") { o.x1 += dx; o.x2 += dx; if (o.island) { o.island.x1 += dx; o.island.x2 += dx; } }
-    else if (o.type === "wall") { o.x += dx; }
+    else if (o.type === "wall") { o.x += dx; if (dy) wallLift(o, dy); } // 上下ドラッグで空中化
     else if (o.type === "mover") { o.x += dx; o.center = Math.max(60, Math.min(GROUND_Y - 20, o.center + dy)); }
     else { o.x += dx; o.y += dy; }
   }
@@ -489,6 +552,11 @@
   }
 
   window.addEventListener("keydown", function (e) {
+    if (mode === "dead") {
+      if (e.code === "Escape") stopPlay();
+      else if (e.code === "Space") { e.preventDefault(); startPlay(); } // 再挑戦
+      return;
+    }
     if (mode === "play") {
       if (e.code === "Escape") { stopPlay(); }
       else if (e.code === "Space") { e.preventDefault(); if (cleared) return; if (player.nearGround || player.onGround) holding = true; else airTapColor(); }
@@ -523,7 +591,7 @@
   });
   document.getElementById("btnNew").addEventListener("click", function () {
     if (!confirm("現在の内容を破棄して新規作成しますか？")) return;
-    stage = newStage(); selected = null; cam = 0; syncToUI(); buildInspector(); syncScroll();
+    stage = newStage(); selected = null; cam = 0; lastTrajectory = []; syncToUI(); buildInspector(); syncScroll();
   });
   document.getElementById("zoom").addEventListener("input", function (e) {
     zoom = parseFloat(e.target.value); clampCam();
@@ -539,21 +607,32 @@
   }
 
   // メタ/物理 UI ⇔ データ 同期
-  const metaEls = { name: "m_name", en: "m_en", hint: "m_hint", req: "m_req" };
+  const metaEls = { name: "m_name", en: "m_en", hint: "m_hint" }; // req はチェックボックス（複数選択）で別扱い
   const physEls = ["G", "BASE_VY", "BASE_VX", "BOOST_MAX", "HEIGHT_PEN", "CHARGE_TIME", "SPEED_ACCEL", "SPEED_EXTRA_MAX"];
+  // 解放スキル（複数選択＝全て必要）
+  function reqFromUI() {
+    return [].slice.call(document.querySelectorAll("#m_req input:checked")).map(function (c) { return c.value; });
+  }
+  function reqToUI(arr) {
+    const set = new Set(arr || []);
+    document.querySelectorAll("#m_req input").forEach(function (c) { c.checked = set.has(c.value); });
+  }
   function syncFromUI() {
     for (const k in metaEls) stage.meta[k] = document.getElementById(metaEls[k]).value;
+    stage.meta.req = reqFromUI();
     stage.length = parseFloat(document.getElementById("m_length").value) || 6000;
     for (const k of physEls) stage.phys[k] = parseFloat(document.getElementById("p_" + k).value);
   }
   function syncToUI() {
     for (const k in metaEls) document.getElementById(metaEls[k]).value = stage.meta[k] || "";
+    reqToUI(stage.meta.req);
     document.getElementById("m_length").value = stage.length;
     for (const k of physEls) document.getElementById("p_" + k).value = stage.phys[k];
     syncScroll();
   }
   // 入力のたびに反映
   Object.values(metaEls).forEach(id => document.getElementById(id).addEventListener("input", syncFromUI));
+  document.querySelectorAll("#m_req input").forEach(c => c.addEventListener("change", syncFromUI));
   document.getElementById("m_length").addEventListener("input", function () { syncFromUI(); syncScroll(); });
   physEls.forEach(k => document.getElementById("p_" + k).addEventListener("input", syncFromUI));
 
@@ -563,14 +642,16 @@
   const GAME_KEY = "cr_custom_stages";
   function serialize() { syncFromUI(); return JSON.stringify(stage, null, 2); }
   function loadStageObj(obj) {
+    const m = obj.meta || {};
     stage = {
-      meta: Object.assign({ name: "", en: "", hint: "", req: "" }, obj.meta || {}),
+      meta: { name: m.name || "", en: m.en || "", hint: m.hint || "",
+              req: Array.isArray(m.req) ? m.req : (m.req ? [m.req] : []) },
       phys: Object.assign({}, PHYS_DEFAULT, obj.phys || {}),
       length: obj.length || 6000,
       obstacles: obj.obstacles || [],
       items: obj.items || []
     };
-    selected = null; cam = 0; syncToUI(); buildInspector();
+    selected = null; cam = 0; lastTrajectory = []; syncToUI(); buildInspector();
   }
   document.getElementById("btnExport").addEventListener("click", function () {
     document.getElementById("io").value = serialize(); showToast("JSONを出力しました");
@@ -629,8 +710,8 @@
     edTime += frame;
     if (mode === "play" && !cleared) { acc += frame; while (acc >= STEP) { updatePlay(STEP); acc -= STEP; } }
     else acc = 0;
-    // テストプレイ中は play 用配列で描画するため、一時的に stage の参照を差し替える
-    if (mode === "play") {
+    // 試遊中・停止中は play 用配列（破壊などが反映された状態）で描画する
+    if (mode === "play" || mode === "dead") {
       const so = stage.obstacles, si = stage.items;
       stage.obstacles = playObstacles; stage.items = playItems;
       draw();

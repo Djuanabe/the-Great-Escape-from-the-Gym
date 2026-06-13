@@ -79,6 +79,10 @@
     return { top: center - o.gapH / 2, bottom: center + o.gapH / 2 };
   }
 
+  // 壁の上端・下端。o.y があれば空中の壁（[y, y+h]）、なければ地面接地（[GROUND_Y-h, GROUND_Y]）。
+  function wallTop(o)    { return (o.y != null) ? o.y : GROUND_Y - o.h; }
+  function wallBottom(o) { return (o.y != null) ? o.y + o.h : GROUND_Y; }
+
   // --- 純粋関数：物理 --------------------------------------------------------
   // 進行距離に応じた基本前進速度（等加速度的に上昇、上限あり）。extraBoost はステージ補正。
   function runSpeedAt(P, x, extraBoost) {
@@ -187,7 +191,7 @@
       ctx.save();
       ctx.globalAlpha = matched ? 0.28 : 1.0;
       if (o.type === "wall") {
-        const wtop = GROUND_Y - o.h;
+        const wtop = wallTop(o);
         ctx.fillStyle = pal.main;
         ctx.fillRect(o.x, wtop, o.w, o.h);
         ctx.fillStyle = pal.light;
@@ -310,6 +314,7 @@
     PHYS_BASE: PHYS_BASE,
     // 純粋関数
     mulberry32: mulberry32, roundRect: roundRect, moverGap: moverGap,
+    wallTop: wallTop, wallBottom: wallBottom,
     runSpeedAt: runSpeedAt, holeAt: holeAt, landableAt: landableAt,
     // 描画プリミティブ
     fillGroundBlock: fillGroundBlock, drawIsland: drawIsland, drawHole: drawHole,

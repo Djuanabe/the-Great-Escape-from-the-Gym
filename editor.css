@@ -51,6 +51,9 @@
   }
   .row .unit { color: #999; flex: 0 0 auto; }
   .hint { color: #888; font-size: 12px; line-height: 1.5; }
+  .reqlist { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .reqlist label { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; color: #444; font-size: 12px; }
+  .reqlist input { width: 15px; height: 15px; }
   .swatches { display: flex; gap: 6px; }
   .swatch { width: 28px; height: 28px; border-radius: 5px; border: 2px solid #ccc; cursor: pointer; }
   .swatch.sel { border-color: #1a73c0; box-shadow: 0 0 0 2px #cfe3f7; }
