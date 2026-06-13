@@ -65,6 +65,13 @@
   const CHARGE_TIME  = 0.72;    // フルチャージまでの時間(秒)。この間に通常ジャンプ1回分進む
   const CHARGE_MAX   = 1.0;     // チャージ上限（超えると自動解放）
   const NEAR_GROUND_H= 90;      // この高さ以内（降下中）ならチャージ可能(px)
+
+  // 可変物理レイヤ：通常は既定値だが、自作ステージ(editor.html)は phys で上書きできる。
+  // プレイ・生成の物理はすべて P.* を参照する（定数は既定値のソースとしてのみ使用）。
+  const PHYS_BASE = { G: G, BASE_VY: BASE_VY, BASE_VX: BASE_VX, BOOST_MAX: BOOST_MAX,
+                      HEIGHT_PEN: HEIGHT_PEN, CHARGE_TIME: CHARGE_TIME,
+                      SPEED_ACCEL: SPEED_ACCEL, SPEED_EXTRA_MAX: SPEED_EXTRA_MAX };
+  let P = Object.assign({}, PHYS_BASE);
   const CAM_ANCHOR   = 130;     // ボールの画面上の位置(px)。小さいほど左寄りで前方が見やすい
   const CAM_SMOOTH   = 6;       // カメラ追従の滑らかさ（大きいほど速い）
   const ZOOM         = 0.74;    // 画面の引き（<1ほど広く見える＝進行先を確認しやすい）
@@ -188,6 +195,26 @@
   function stageUnlocked(st) { return !st.req || hasSkill(st.req); }
 
   // ---------------------------------------------------------------------------
+  // 自作ステージ（editor.html が localStorage "cr_custom_stages" に保存）を読み込む。
+  // STAGES の末尾に追加して、ステージ選択にそのまま並ぶようにする。
+  // ---------------------------------------------------------------------------
+  function loadCustomStages() {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem("cr_custom_stages") || "[]") || []; } catch (e) { list = []; }
+    for (let i = STAGES.length - 1; i >= 0; i--) if (STAGES[i].custom) STAGES.splice(i, 1);
+    list.forEach(function (s) {
+      const m = s.meta || {};
+      STAGES.push({
+        id: "custom:" + (m.name || "?"), name: m.name || "自作", en: m.en || "Custom",
+        req: m.req || null, hint: m.hint || "自作ステージ / Custom", cfg: {},
+        custom: true, phys: s.phys || {}, length: s.length || 6000,
+        obstacles: s.obstacles || [], items: s.items || []
+      });
+    });
+  }
+  loadCustomStages();
+
+  // ---------------------------------------------------------------------------
   // シード付き乱数 (mulberry32) — 再現可能なステージ生成のため
   // ---------------------------------------------------------------------------
   function mulberry32(a) {
@@ -209,6 +236,8 @@
   let reviveUsed = false; // このランでリバイブを使ったか
   let invulnT = 0;        // リバイブ直後の無敵時間(秒)
   let bankedThisRun = 0;  // リザルト表示用：このランで貯金された星数
+  let customGoalX = 0;    // 自作ステージのゴールx（0=エンドレス）
+  let cleared = false;    // 自作ステージをクリアしたか
   let rng;              // 生成用乱数
   let ghost;            // ステージ生成用の通過可能ゴースト
   let obstacles;
@@ -318,9 +347,9 @@
     return v == null ? def : v;
   }
   // スキルを反映した実効パラメータ
-  function effChargeTime() { return skillOn("break") ? BREAK_CHARGE_TIME : CHARGE_TIME; }
+  function effChargeTime() { return skillOn("break") ? BREAK_CHARGE_TIME : P.CHARGE_TIME; }
   function effGlideFrac()  { return skillOn("break") ? BREAK_GLIDE_FRAC : 1; }
-  function effHeightPen()  { return skillOn("high") ? HIGH_HEIGHT_PEN : HEIGHT_PEN; }
+  function effHeightPen()  { return skillOn("high") ? HIGH_HEIGHT_PEN : P.HEIGHT_PEN; }
 
   function reset() {
     state = "title";
@@ -336,8 +365,12 @@
     starsCollected = 0;
     generatedUpToX = 0;
     lastObstacleX = -Infinity;
+    cleared = false;
+    customGoalX = 0;
+    // 物理：自作ステージは phys で上書き、それ以外は既定値
+    P = Object.assign({}, PHYS_BASE, (stage && stage.custom && stage.phys) ? stage.phys : {});
     player = {
-      x: 60, y: GROUND_Y, vy: 0, vx: BASE_VX,
+      x: 60, y: GROUND_Y, vy: 0, vx: P.BASE_VX,
       onGround: true, alive: true, nearGround: true,
       ballColor: COL_ORANGE, breakJump: false
     };
@@ -352,7 +385,17 @@
     reviveUsed = false;
     invulnT = 0;
     bankedThisRun = 0;
-    ensureGenerated(player.x + SEG_W * 2);
+    if (stage && stage.custom) {
+      // 手作りの障害物・スターを固定配置（手続き生成は止める）
+      // 画面外クリーンアップが左端順を前提にするため、左端でソートしておく
+      obstacles = JSON.parse(JSON.stringify(stage.obstacles))
+                    .sort(function (a, b) { return (a.x1 != null ? a.x1 : a.x) - (b.x1 != null ? b.x1 : b.x); });
+      items = JSON.parse(JSON.stringify(stage.items)).sort(function (a, b) { return a.x - b.x; });
+      generatedUpToX = 1e9;
+      customGoalX = stage.length;
+    } else {
+      ensureGenerated(player.x + SEG_W * 2);
+    }
   }
 
   function startGame() {
@@ -379,13 +422,13 @@
     while (ghost.x < segEnd) {
       // 放物線アーク（ランダムなチャージ）。障害物はアーク内のみ。着地後すぐ次のアーク。
       const c = rng() < 0.5 ? 0 : rng() * CHARGE_MAX;
-      const vy = BASE_VY * (1 - c * effHeightPen()); // ゴーストもスキル込みの物理で跳ぶ
+      const vy = P.BASE_VY * (1 - c * effHeightPen()); // ゴーストもスキル込みの物理で跳ぶ
       const x0 = ghost.x;
-      const vx = runSpeedAt(x0) + c * BOOST_MAX; // プレイヤーと同じ距離依存の速度で生成
-      const T  = 2 * vy / G;
+      const vx = runSpeedAt(x0) + c * P.BOOST_MAX; // プレイヤーと同じ距離依存の速度で生成
+      const T  = 2 * vy / P.G;
       const landX = x0 + vx * T;
-      const apexX = x0 + vx * (vy / G);
-      const apexY = GROUND_Y - vy * vy / (2 * G);
+      const apexX = x0 + vx * (vy / P.G);
+      const apexY = GROUND_Y - vy * vy / (2 * P.G);
       if (x0 >= START_SAFE_X) {
         placeArcObstacle(x0, landX, apexX, apexY);
       }
@@ -733,7 +776,7 @@
         // チャージ中は一定速度で前進。フルチャージ(CHARGE_TIME)でちょうど
         // 通常ジャンプ1回分の飛距離（= runSpeed × 滞空時間）だけ進むよう速度を設定。
         // ブレイクチャージ時は時間も滑走距離も同率で短縮（体感の滑走速度は同じ）
-        const jumpDist = runSpeedAt(p.x) * (2 * BASE_VY / G) * effGlideFrac();
+        const jumpDist = runSpeedAt(p.x) * (2 * P.BASE_VY / P.G) * effGlideFrac();
         p.vx = jumpDist / effChargeTime();
         p.y = GROUND_Y; p.vy = 0;
       } else if (charge > 0) {
@@ -746,7 +789,7 @@
       }
     } else {
       // 空中ではチャージしない（押していても何も溜まらない）
-      p.vy += G * dt;
+      p.vy += P.G * dt;
     }
 
     p.x += p.vx * dt;
@@ -772,7 +815,10 @@
       if (tut.doneAt >= 0 && time - tut.doneAt > 1.6) { finishTutorial(); return; }
     }
 
-    ensureGenerated(p.x + SEG_W * 2);
+    // 自作ステージ：ゴール到達でクリア
+    if (customGoalX && p.x >= customGoalX) return clearStage();
+
+    ensureGenerated(p.x + SEG_W * 2); // 自作は generatedUpToX=1e9 で実質no-op
 
     const cutoff = p.x - SEG_W;
     while (obstacles.length && obstacleRight(obstacles[0]) < cutoff) obstacles.shift();
@@ -806,14 +852,14 @@
 
   // 進行距離に応じた基本前進速度（等加速度的に緩やかに上昇、上限あり）
   function runSpeedAt(x) {
-    return BASE_VX + scN("speedBoost", 0) + Math.min(SPEED_EXTRA_MAX, x * SPEED_ACCEL);
+    return P.BASE_VX + scN("speedBoost", 0) + Math.min(P.SPEED_EXTRA_MAX, x * P.SPEED_ACCEL);
   }
 
   function launch(c) {
     const p = player;
-    p.vy = -BASE_VY * (1 - c * effHeightPen());
+    p.vy = -P.BASE_VY * (1 - c * effHeightPen());
     // チャージ分はそのジャンプ限りの加速（慣性として蓄積しない）。基本速度は進行で緩やかに上昇。
-    p.vx = runSpeedAt(p.x) + c * BOOST_MAX;
+    p.vx = runSpeedAt(p.x) + c * P.BOOST_MAX;
     p.onGround = false;
     // ブレイクチャージ：フルチャージで放ったジャンプ中は白壁を破壊できる
     p.breakJump = skillOn("break") && c >= 0.98;
@@ -860,6 +906,21 @@
     const arr = [COL_ORANGE, COL_BLACK];
     if (skillOn("white")) arr.push(COL_WHITE);
     return arr.filter(function (c) { return c !== bannedColor; });
+  }
+
+  // 自作ステージのゴール到達：クリア（dead画面を「STAGE CLEAR」として再利用）
+  function clearStage() {
+    if (cleared || !player.alive) return;
+    cleared = true;
+    player.alive = false;
+    state = "dead";
+    deadAt = time;
+    stopChargeTone();
+    bankedThisRun = starsCollected;
+    starBank += starsCollected; saveBank();
+    const clearM = Math.floor(customGoalX / 10);
+    if (clearM > (bests[stage.id] || 0)) { bests[stage.id] = clearM; best = clearM; saveBests(); }
+    playCoin();
   }
 
   function die(killer) {
@@ -1619,9 +1680,15 @@
   function drawDead() {
     overlay();
     ctx.textAlign = "center";
-    ctx.fillStyle = "#ff7080";
-    ctx.font = "bold 48px sans-serif";
-    ctx.fillText("GAME OVER", W / 2, H / 2 - 40);
+    if (cleared) {
+      ctx.fillStyle = "#5ad6c0";
+      ctx.font = "bold 48px sans-serif";
+      ctx.fillText("STAGE CLEAR", W / 2, H / 2 - 40);
+    } else {
+      ctx.fillStyle = "#ff7080";
+      ctx.font = "bold 48px sans-serif";
+      ctx.fillText("GAME OVER", W / 2, H / 2 - 40);
+    }
     ctx.fillStyle = "#fff";
     ctx.font = "bold 30px sans-serif";
     ctx.fillText("DISTANCE " + score + " m", W / 2, H / 2 + 14);
