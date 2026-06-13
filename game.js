@@ -395,7 +395,7 @@
     if (x0 - lastObstacleX < spacing) return;
 
     // 距離が進むほど障害物の出現確率が上がる
-    const pObstacle = Math.min(0.95, 0.5 + scN("pObsBoost", 0) + dist * 0.00003);
+    const pObstacle = Math.min(0.95, 0.5 + scN("pObsBoost", 0) + dist * 0.00005);
     if (rng() > pObstacle) return;
 
     const arcW = landX - x0;

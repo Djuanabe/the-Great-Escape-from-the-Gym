@@ -48,7 +48,7 @@
     BOOST_MAX: 330,     // チャージ解放時のそのジャンプ限りの前進加速
     HEIGHT_PEN: 0.45,   // 最大チャージ時の高度低下率
     CHARGE_TIME: 0.72,  // フルチャージまでの時間(秒)
-    SPEED_ACCEL: 0.02,  // 進行距離あたりの加速 (px/s / px)
+    SPEED_ACCEL: 0.012, // 進行距離あたりの加速 (px/s / px)。緩やかに上昇
     SPEED_EXTRA_MAX: 520// 進行による加速の上限(px/s)
   };
 
