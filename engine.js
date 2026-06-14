@@ -302,6 +302,138 @@
     ctx.restore();
   }
 
+  // --- サウンド（Web Audio）。本編とエディタ試遊で共有する --------------------
+  const Sound = (function () {
+    let actx = null, chargeOsc = null, chargeGain = null;
+    function ensure() {
+      if (!actx) {
+        try { actx = new (global.AudioContext || global.webkitAudioContext)(); }
+        catch (e) { actx = null; }
+      }
+      if (actx && actx.state === "suspended") actx.resume();
+    }
+    function startCharge() {
+      if (!actx || chargeOsc) return;
+      chargeOsc = actx.createOscillator();
+      chargeGain = actx.createGain();
+      chargeOsc.type = "triangle";
+      chargeOsc.frequency.value = 220;
+      chargeGain.gain.value = 0.0001;
+      chargeGain.gain.linearRampToValueAtTime(0.10, actx.currentTime + 0.03);
+      chargeOsc.connect(chargeGain).connect(actx.destination);
+      chargeOsc.start();
+    }
+    function updateCharge(c) {
+      if (!actx || !chargeOsc) return;
+      const f = 220 * Math.pow(2, c * 2); // 溜まるほど約2オクターブ上昇
+      chargeOsc.frequency.setTargetAtTime(f, actx.currentTime, 0.02);
+    }
+    function stopCharge() {
+      if (!actx || !chargeOsc) return;
+      const o = chargeOsc, g = chargeGain;
+      g.gain.cancelScheduledValues(actx.currentTime);
+      g.gain.setTargetAtTime(0.0001, actx.currentTime, 0.03);
+      o.stop(actx.currentTime + 0.12);
+      chargeOsc = null; chargeGain = null;
+    }
+    function switchColor(color) {
+      if (!actx) return;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "triangle";
+      const base = color === COL_BLACK ? 300 : 520; // 色で音程を変える
+      o.frequency.setValueAtTime(base, actx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(base * 1.5, actx.currentTime + 0.07);
+      g.gain.setValueAtTime(0.12, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
+      o.connect(g).connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.12);
+    }
+    function jump(c) {
+      if (!actx) return;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "square";
+      const base = 330 + c * 260;
+      o.frequency.setValueAtTime(base, actx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(base * 1.7, actx.currentTime + 0.10);
+      g.gain.setValueAtTime(0.16, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
+      o.connect(g).connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.18);
+    }
+    function land() {
+      if (!actx) return;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(190, actx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(70, actx.currentTime + 0.11);
+      g.gain.setValueAtTime(0.2, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
+      o.connect(g).connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.18);
+    }
+    function death() {
+      if (!actx) return;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(420, actx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(80, actx.currentTime + 0.4);
+      g.gain.setValueAtTime(0.18, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.45);
+      o.connect(g).connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.5);
+    }
+    function coin() {
+      if (!actx) return;
+      const t0 = actx.currentTime;
+      [988, 1319].forEach(function (f, i) {
+        const o = actx.createOscillator(), g = actx.createGain();
+        o.type = "triangle";
+        o.frequency.setValueAtTime(f, t0 + i * 0.05);
+        g.gain.setValueAtTime(0.0001, t0 + i * 0.05);
+        g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.05 + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.05 + 0.16);
+        o.connect(g).connect(actx.destination);
+        o.start(t0 + i * 0.05); o.stop(t0 + i * 0.05 + 0.18);
+      });
+    }
+    function brk() { // 白壁粉砕：ノイズ風の短い破裂音
+      if (!actx) return;
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(160, actx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(40, actx.currentTime + 0.18);
+      g.gain.setValueAtTime(0.22, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.2);
+      o.connect(g).connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.22);
+      const o2 = actx.createOscillator(), g2 = actx.createGain();
+      o2.type = "square";
+      o2.frequency.setValueAtTime(880, actx.currentTime);
+      o2.frequency.exponentialRampToValueAtTime(220, actx.currentTime + 0.08);
+      g2.gain.setValueAtTime(0.10, actx.currentTime);
+      g2.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
+      o2.connect(g2).connect(actx.destination);
+      o2.start(); o2.stop(actx.currentTime + 0.12);
+    }
+    function revive() { // 復活：上昇する3音
+      if (!actx) return;
+      const t0 = actx.currentTime;
+      [392, 523, 784].forEach(function (f, i) {
+        const o = actx.createOscillator(), g = actx.createGain();
+        o.type = "triangle";
+        o.frequency.setValueAtTime(f, t0 + i * 0.09);
+        g.gain.setValueAtTime(0.0001, t0 + i * 0.09);
+        g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.09 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.09 + 0.22);
+        o.connect(g).connect(actx.destination);
+        o.start(t0 + i * 0.09); o.stop(t0 + i * 0.09 + 0.25);
+      });
+    }
+    return { ensure: ensure, startCharge: startCharge, updateCharge: updateCharge,
+             stopCharge: stopCharge, switchColor: switchColor, jump: jump, land: land,
+             death: death, coin: coin, brk: brk, revive: revive };
+  })();
+
   global.Bound = {
     // 定数
     VIEW_W: VIEW_W, VIEW_H: VIEW_H,
@@ -318,6 +450,8 @@
     runSpeedAt: runSpeedAt, holeAt: holeAt, landableAt: landableAt,
     // 描画プリミティブ
     fillGroundBlock: fillGroundBlock, drawIsland: drawIsland, drawHole: drawHole,
-    drawGround: drawGround, drawObstacles: drawObstacles, drawItems: drawItems, drawBall: drawBall
+    drawGround: drawGround, drawObstacles: drawObstacles, drawItems: drawItems, drawBall: drawBall,
+    // サウンド
+    Sound: Sound
   };
 })(typeof window !== "undefined" ? window : this);

@@ -392,8 +392,10 @@
   // テストプレイ（index.html の物理を忠実に再現）
   // =========================================================================
   let player, charge, holding, collected, deaths, cleared;
+  const S = Bound.Sound; // 効果音は本編と共有
   function startPlay() {
     syncFromUI();
+    S.ensure(); // ユーザー操作（ボタン/キー）のタイミングで音声を有効化
     mode = "play";
     player = { x: 60, y: GROUND_Y, vy: 0, vx: stage.phys.BASE_VX,
                onGround: true, nearGround: true, ballColor: COL_ORANGE, breakJump: false };
@@ -407,6 +409,7 @@
   }
   function stopPlay() {
     if (trajectory.length > 1) lastTrajectory = trajectory.slice(); // 編集に戻っても軌道を残す
+    S.stopCharge();
     mode = "edit";
     document.getElementById("btnPlay").textContent = "▶ テストプレイ";
   }
@@ -414,6 +417,7 @@
   function gameOver() {
     deaths++;
     lastTrajectory = trajectory.slice();
+    S.stopCharge(); S.death();
     mode = "dead";
   }
   let playObstacles = [], playItems = [];
@@ -428,12 +432,14 @@
     p.onGround = false;
     p.breakJump = c >= 0.98;
     charge = 0;
+    S.stopCharge(); S.jump(c);
   }
   function updatePlay(dt) {
     const p = player;
     p.nearGround = p.onGround || (p.vy >= 0 && (GROUND_Y - p.y) <= NEAR_GROUND_H);
     const canCharge = holding && p.nearGround;
-    if (canCharge) charge = Math.min(CHARGE_MAX, charge + dt / P().CHARGE_TIME);
+    if (canCharge) { charge = Math.min(CHARGE_MAX, charge + dt / P().CHARGE_TIME); S.startCharge(); S.updateCharge(charge); }
+    else S.stopCharge();
     if (p.onGround) {
       if (holding && charge < CHARGE_MAX) {
         const jumpDist = runSpeedAt(p.x) * (2 * P().BASE_VY / P().G);
@@ -446,8 +452,10 @@
     p.x += p.vx * dt; p.y += p.vy * dt;
     trajectory.push({ x: p.x, y: p.y }); // 軌道を記録（死亡地点まで）
     if (p.y >= GROUND_Y) {
-      if (Bound.landableAt(playObstacles, p.x, player.ballColor)) { p.y = GROUND_Y; p.vy = 0; p.onGround = true; p.breakJump = false; }
-      else { p.onGround = false; if (p.y > DEATH_Y) return gameOver(); }
+      if (Bound.landableAt(playObstacles, p.x, player.ballColor)) {
+        if (!p.onGround) S.land(); // 空中→接地の瞬間だけ
+        p.y = GROUND_Y; p.vy = 0; p.onGround = true; p.breakJump = false;
+      } else { p.onGround = false; if (p.y > DEATH_Y) return gameOver(); }
     }
     // 衝突
     const left = p.x - PLAYER_W / 2, right = p.x + PLAYER_W / 2, top = p.y - PLAYER_H, bottom = p.y;
@@ -457,7 +465,7 @@
       if (o.type === "wall") {
         const wtop = Bound.wallTop(o), wbot = Bound.wallBottom(o);
         if (right > o.x && left < o.x + o.w && bottom > wtop && top < wbot) {
-          if (p.breakJump && o.color === COL_WHITE) { playObstacles.splice(i, 1); i--; continue; }
+          if (p.breakJump && o.color === COL_WHITE) { playObstacles.splice(i, 1); i--; S.brk(); continue; }
           return gameOver();
         }
       } else if (o.type === "mover") {
@@ -471,10 +479,10 @@
     const bcx = p.x, bcy = p.y - BALL_R;
     for (let i = playItems.length - 1; i >= 0; i--) {
       const it = playItems[i], dx = it.x - bcx, dy = it.y - bcy;
-      if (dx * dx + dy * dy < ITEM_COLLECT_R * ITEM_COLLECT_R) { playItems.splice(i, 1); collected++; }
+      if (dx * dx + dy * dy < ITEM_COLLECT_R * ITEM_COLLECT_R) { playItems.splice(i, 1); collected++; S.coin(); }
     }
     // ゴール
-    if (p.x >= stage.length) cleared = true;
+    if (p.x >= stage.length && !cleared) { cleared = true; S.stopCharge(); S.coin(); }
     // カメラ
     const camTarget = p.x - CAM_ANCHOR / zoom;
     cam += (camTarget - cam) * Math.min(1, CAM_SMOOTH * dt);
@@ -549,6 +557,7 @@
     const arr = [COL_ORANGE, COL_BLACK, COL_WHITE];
     const i = arr.indexOf(player.ballColor);
     player.ballColor = arr[(i + 1) % arr.length];
+    S.switchColor(player.ballColor);
   }
 
   window.addEventListener("keydown", function (e) {

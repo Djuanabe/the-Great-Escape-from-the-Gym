@@ -174,6 +174,7 @@
   let starsCollected;    // 取得したスター数
   let generatedUpToX;
   let lastObstacleX;    // 直前に置いた妨害要素のx（間隔制御用）
+  let lastColored;      // 直前に置いた色付き壁の色（同色連続を避けるため）
   let player;
   let time;             // ゲーム内経過時間(秒) — 上下する壁の駆動に使用
   let score, best;
@@ -294,6 +295,7 @@
     starsCollected = 0;
     generatedUpToX = 0;
     lastObstacleX = -Infinity;
+    lastColored = null;
     cleared = false;
     customGoalX = 0;
     // 物理：自作ステージは phys で上書き、それ以外は既定値
@@ -370,7 +372,16 @@
   function pickWallColor(dist) {
     const pColored = Math.min(scN("coloredMax", COLORED_MAX),
                               scN("coloredBase", COLORED_BASE) + dist * scN("coloredRate", COLORED_RATE));
-    if (rng() < pColored) return rng() < 0.5 ? COL_ORANGE : COL_BLACK;
+    if (rng() < pColored) {
+      // 直前の色付きと同色になる確率を下げる（連続を避けて色チェンジを促す）。
+      // 直前と同色 25% / 反対色 75%。白を挟んでも直前の色付きを基準にする。
+      let c;
+      if (lastColored === COL_ORANGE) c = rng() < 0.25 ? COL_ORANGE : COL_BLACK;
+      else if (lastColored === COL_BLACK) c = rng() < 0.25 ? COL_BLACK : COL_ORANGE;
+      else c = rng() < 0.5 ? COL_ORANGE : COL_BLACK;
+      lastColored = c;
+      return c;
+    }
     return COL_WHITE;
   }
 
@@ -873,141 +884,20 @@
   }
 
   // ---------------------------------------------------------------------------
-  // サウンド（Web Audio）
+  // サウンド：共有エンジン Bound.Sound に委譲（呼び出し名は従来どおり）
   // ---------------------------------------------------------------------------
-  let actx = null;
-  let chargeOsc = null, chargeGain = null;
-
-  function ensureAudio() {
-    if (!actx) {
-      try { actx = new (window.AudioContext || window.webkitAudioContext)(); }
-      catch (e) { actx = null; }
-    }
-    if (actx && actx.state === "suspended") actx.resume();
-  }
-
-  function startChargeTone() {
-    if (!actx || chargeOsc) return;
-    chargeOsc = actx.createOscillator();
-    chargeGain = actx.createGain();
-    chargeOsc.type = "triangle";
-    chargeOsc.frequency.value = 220;
-    chargeGain.gain.value = 0.0001;
-    chargeGain.gain.linearRampToValueAtTime(0.10, actx.currentTime + 0.03);
-    chargeOsc.connect(chargeGain).connect(actx.destination);
-    chargeOsc.start();
-  }
-  function updateChargeTone(c) {
-    if (!actx || !chargeOsc) return;
-    // チャージが進むほど高い音階へ（約2オクターブ上昇）
-    const f = 220 * Math.pow(2, c * 2);
-    chargeOsc.frequency.setTargetAtTime(f, actx.currentTime, 0.02);
-  }
-  function stopChargeTone() {
-    if (!actx || !chargeOsc) return;
-    const o = chargeOsc, g = chargeGain;
-    g.gain.cancelScheduledValues(actx.currentTime);
-    g.gain.setTargetAtTime(0.0001, actx.currentTime, 0.03);
-    o.stop(actx.currentTime + 0.12);
-    chargeOsc = null; chargeGain = null;
-  }
-  function playSwitch() {
-    if (!actx) return;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = "triangle";
-    const base = player.ballColor === COL_BLACK ? 300 : 520; // 色で音程を変える
-    o.frequency.setValueAtTime(base, actx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(base * 1.5, actx.currentTime + 0.07);
-    g.gain.setValueAtTime(0.12, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
-    o.connect(g).connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + 0.12);
-  }
-  function playJump(c) {
-    if (!actx) return;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = "square";
-    const base = 330 + c * 260;                // チャージが大きいほど高い
-    o.frequency.setValueAtTime(base, actx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(base * 1.7, actx.currentTime + 0.10);
-    g.gain.setValueAtTime(0.16, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
-    o.connect(g).connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + 0.18);
-  }
-  function playLand() {
-    if (!actx) return;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = "sine";
-    o.frequency.setValueAtTime(190, actx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(70, actx.currentTime + 0.11);
-    g.gain.setValueAtTime(0.2, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.16);
-    o.connect(g).connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + 0.18);
-  }
-  function playDeath() {
-    if (!actx) return;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = "sawtooth";
-    o.frequency.setValueAtTime(420, actx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(80, actx.currentTime + 0.4);
-    g.gain.setValueAtTime(0.18, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.45);
-    o.connect(g).connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + 0.5);
-  }
-  function playCoin() {
-    if (!actx) return;
-    // 明るい2音のチャイム（取得の気持ちよさ）
-    var t0 = actx.currentTime;
-    [988, 1319].forEach(function (f, i) {
-      var o = actx.createOscillator(), g = actx.createGain();
-      o.type = "triangle";
-      o.frequency.setValueAtTime(f, t0 + i * 0.05);
-      g.gain.setValueAtTime(0.0001, t0 + i * 0.05);
-      g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.05 + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.05 + 0.16);
-      o.connect(g).connect(actx.destination);
-      o.start(t0 + i * 0.05); o.stop(t0 + i * 0.05 + 0.18);
-    });
-  }
-
-  function playBreak() {
-    if (!actx) return;
-    // 白壁粉砕：ノイズ風の短い破裂音
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = "sawtooth";
-    o.frequency.setValueAtTime(160, actx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(40, actx.currentTime + 0.18);
-    g.gain.setValueAtTime(0.22, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.2);
-    o.connect(g).connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + 0.22);
-    const o2 = actx.createOscillator(), g2 = actx.createGain();
-    o2.type = "square";
-    o2.frequency.setValueAtTime(880, actx.currentTime);
-    o2.frequency.exponentialRampToValueAtTime(220, actx.currentTime + 0.08);
-    g2.gain.setValueAtTime(0.10, actx.currentTime);
-    g2.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.1);
-    o2.connect(g2).connect(actx.destination);
-    o2.start(); o2.stop(actx.currentTime + 0.12);
-  }
-  function playRevive() {
-    if (!actx) return;
-    // 復活：上昇する3音
-    const t0 = actx.currentTime;
-    [392, 523, 784].forEach(function (f, i) {
-      const o = actx.createOscillator(), g = actx.createGain();
-      o.type = "triangle";
-      o.frequency.setValueAtTime(f, t0 + i * 0.09);
-      g.gain.setValueAtTime(0.0001, t0 + i * 0.09);
-      g.gain.linearRampToValueAtTime(0.16, t0 + i * 0.09 + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.09 + 0.22);
-      o.connect(g).connect(actx.destination);
-      o.start(t0 + i * 0.09); o.stop(t0 + i * 0.09 + 0.25);
-    });
-  }
+  const S = Bound.Sound;
+  function ensureAudio()      { S.ensure(); }
+  function startChargeTone()  { S.startCharge(); }
+  function updateChargeTone(c){ S.updateCharge(c); }
+  function stopChargeTone()   { S.stopCharge(); }
+  function playSwitch()       { S.switchColor(player.ballColor); }
+  function playJump(c)        { S.jump(c); }
+  function playLand()         { S.land(); }
+  function playDeath()        { S.death(); }
+  function playCoin()         { S.coin(); }
+  function playBreak()        { S.brk(); }
+  function playRevive()       { S.revive(); }
 
   // ---------------------------------------------------------------------------
   // 描画
