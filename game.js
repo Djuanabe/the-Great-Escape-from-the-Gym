@@ -54,8 +54,8 @@
   // 妨害要素どうしの最低間隔は「反応時間(秒)」で管理する（px固定ではなく速度に追従）。
   // 〜2000m は GAP_TIME_SOLO 一定で「目の前の1個ずつ対応」できる余裕を保証。
   // 2000m→6000m で徐々に短縮し、前のジャンプ中に次を仕込む＝先読みが要る難易度へ。
-  const GAP_TIME_SOLO = 1.4;       // 〜2000m の障害物間の反応時間(秒)
-  const GAP_TIME_MIN  = 0.6;       // 6000m以降の反応時間(秒)
+  const GAP_TIME_SOLO = 1.1;       // 〜2000m の障害物間の反応時間(秒)
+  const GAP_TIME_MIN  = 0.4;       // 6000m以降の反応時間(秒)
   const GAP_PHASE1_X  = 20000;     // 2000m（ここまではSOLO一定）
   const GAP_PHASE2_X  = 60000;     // 6000m（ここでMINに到達）
 
@@ -392,21 +392,17 @@
     else gapT = gSolo + (gMin - gSolo) *
                (dist - GAP_PHASE1_X) / (GAP_PHASE2_X - GAP_PHASE1_X);
     const spacing = runSpeedAt(x0) * gapT;
-    if (x0 - lastObstacleX < spacing) return;
-
-    // 距離が進むほど障害物の出現確率が上がる
-    const pObstacle = Math.min(0.99, 0.5 + scN("pObsBoost", 0) + dist * 0.00005);
-    if (rng() > pObstacle) return;
-
     const arcW = landX - x0;
-    const clearance = GROUND_Y - apexY;
-    const t = rng();
+    // 出現確率（距離で上昇）。各候補位置ごとに判定する。
+    const dens = Math.min(0.99, 0.5 + scN("pObsBoost", 0) + dist * 0.00005);
     const wHole = scN("wHole", 0.40), wWall = scN("wWall", 0.70);
 
-    if (t < wHole && arcW > (2 * margin + 70)) {
+    // --- 穴：1アーク1個（弧の中央をまたぐ）。壁等は混ぜない ---------------------
+    if (rng() < wHole && arcW > (2 * margin + 70)) {
+      if (x0 - lastObstacleX < spacing) return;          // 直前と近すぎる
+      if (rng() > dens) { lastObstacleX = landX; return; } // 確率で空きアーク
       const hx1 = x0 + margin, hx2 = landX - margin;
       const hole = { type: "hole", x1: hx1, x2: hx2 };
-      // 救済の浮島は「最大級の穴」だけに置く（中サイズの穴には付けない）。
       const islandThreshold = Math.max(ISLAND_HOLE_MIN, runSpeedAt(x0) * ISLAND_HOLE_FRAC);
       if (hx2 - hx1 > islandThreshold) {
         const cx = (hx1 + hx2) / 2;
@@ -418,41 +414,53 @@
       }
       obstacles.push(hole);
       lastObstacleX = landX;
-      // 穴の上空（アーク頂点付近）に配置
       tryPlaceStar(x0, landX, apexY, (hx1 + hx2) / 2);
-    } else if (t < wWall) {
-      // 資材倉庫など：tallWall の確率で「跳び越え不能な白壁」（破壊専用）を置く
-      if (rng() < scN("tallWall", 0)) {
-        const h = clearance + 50 + rng() * 60;
-        obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: COL_WHITE, breakable: true });
-        lastObstacleX = apexX + 14;
-        // 壁の少し手前（助走側）に配置
-        tryPlaceStar(x0, landX, apexY, apexX - 35);
-        return;
+      return;
+    }
+
+    // --- 破壊専用の白高壁（資材倉庫など）：1アーク1個 -------------------------
+    if (rng() < scN("tallWall", 0)) {
+      if (x0 - lastObstacleX < spacing) return;
+      const h = (GROUND_Y - apexY) + 50 + rng() * 60;
+      obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: COL_WHITE, breakable: true });
+      lastObstacleX = apexX + 14;
+      tryPlaceStar(x0, landX, apexY, apexX - 35);
+      return;
+    }
+
+    // --- 壁・移動壁：1つの弧の中に spacing ごとに複数配置できる --------------
+    // 各位置でゴースト軌道の地上高（クリアランス）の下に収めるので通過可能性は保つ。
+    const pWall = Math.min(1, Math.max(0, (wWall - wHole) / Math.max(0.0001, 1 - wHole)));
+    // 同じ弧の中の連続配置は反応時間より詰めてよい（1回のジャンプで全部越えられるため）。
+    const innerStep = Math.max(46, spacing * 0.5);
+    let cx = Math.max(x0 + margin, lastObstacleX + spacing);
+    let placed = 0;
+    while (cx <= landX - margin && placed < 4) {
+      const f = (cx - x0) / arcW;
+      const clr = 4 * (GROUND_Y - apexY) * f * (1 - f); // 軌道の地上高
+      if (clr < margin + 8) { cx += innerStep; continue; } // 端は低すぎるので飛ばす
+      if (rng() > dens) { cx += innerStep; continue; }      // 確率で空ける
+      if (rng() < pWall) {
+        const h = Math.min(clr - margin, scN("wallMaxH", MAX_WALL_H));
+        if (h > MIN_WALL_H) {
+          obstacles.push({ type: "wall", x: Math.round(cx - 14), w: 28, h: h, color: pickWallColor(dist) });
+          lastObstacleX = cx + 14; placed++;
+          tryPlaceStar(x0, landX, apexY, cx);
+        }
+      } else {
+        const ampl = Math.min(MAX_AMPL * scN("moverAmpl", 1), (28 + dist * 0.004) * scN("moverAmpl", 1));
+        const gapH = 2 * (ampl / scN("moverAmpl", 1) + margin);
+        obstacles.push({
+          type: "mover", x: Math.round(cx - 17), w: 34,
+          center: GROUND_Y - clr, ampl: ampl, gapH: gapH, // ギャップ中心＝その位置の軌道高
+          phase: rng() * Math.PI * 2,
+          speed: (1.4 + rng() * 1.6) * scN("moverSpeed", 1),
+          color: pickWallColor(dist)
+        });
+        lastObstacleX = cx + 17; placed++;
+        tryPlaceStar(x0, landX, apexY, cx);
       }
-      const h = Math.min(clearance - margin, scN("wallMaxH", MAX_WALL_H));
-      if (h > MIN_WALL_H) {
-        const color = pickWallColor(dist);
-        obstacles.push({ type: "wall", x: apexX - 14, w: 28, h: h, color: color });
-        lastObstacleX = apexX + 14;
-        // 壁の真上（軌道がギリギリ越える高さ）に配置
-        tryPlaceStar(x0, landX, apexY, apexX);
-      }
-    } else {
-      const ampl = Math.min(MAX_AMPL * scN("moverAmpl", 1), (28 + dist * 0.004) * scN("moverAmpl", 1));
-      const gapH = 2 * (ampl / scN("moverAmpl", 1) + margin); // 隙間は基準振幅ベースで確保
-      const color = pickWallColor(dist);
-      obstacles.push({
-        type: "mover",
-        x: apexX - 17, w: 34,
-        center: apexY, ampl: ampl, gapH: gapH,
-        phase: rng() * Math.PI * 2,
-        speed: (1.4 + rng() * 1.6) * scN("moverSpeed", 1),
-        color: color
-      });
-      lastObstacleX = apexX + 17;
-      // 移動壁のギャップ中心（軌道が通過する位置）に配置
-      tryPlaceStar(x0, landX, apexY, apexX);
+      cx = lastObstacleX + innerStep;
     }
   }
 
